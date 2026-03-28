@@ -83,6 +83,14 @@ pub struct QueueState {
 
 impl QueueState {
     pub fn push(&mut self, song: Song) {
+        // Keep pre_shuffle_order in sync: it is the canonical "original order"
+        // and must always reflect what the queue would look like un-shuffled.
+        // Initialized lazily on first push so that Option::None means
+        // "no songs have been added yet" rather than "unshuffle unavailable".
+        match &mut self.pre_shuffle_order {
+            Some(orig) => orig.push(song.clone()),
+            None => self.pre_shuffle_order = Some(vec![song.clone()]),
+        }
         self.songs.push(song);
     }
 

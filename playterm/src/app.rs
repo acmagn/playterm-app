@@ -736,9 +736,9 @@ impl App {
         if len < 2 {
             return;
         }
-        // Snapshot before shuffling so the user can unshuffle.
-        // Always overwrite — the snapshot is always "order right before the most recent shuffle".
-        self.queue.pre_shuffle_order = Some(self.queue.songs.clone());
+        // pre_shuffle_order is maintained by QueueState::push and must NOT be
+        // overwritten here — it always holds the original add-order so Z can
+        // revert regardless of how many times x is pressed.
 
         // LCG seeded from system time — no external crate needed.
         let seed = std::time::SystemTime::now()
@@ -830,11 +830,12 @@ impl App {
     }
 
     fn handle_unshuffle(&mut self) {
-        let original = match self.queue.pre_shuffle_order.take() {
-            Some(o) => o,
+        let original = match &self.queue.pre_shuffle_order {
+            Some(o) => o.clone(),
             None => return,
         };
-        // Find the currently-playing track in the restored order.
+        // Do NOT clear pre_shuffle_order — Z should always work, even after
+        // reshuffling multiple times.
         let current_id = self.queue.current().map(|s| s.id.clone());
         self.queue.songs = original;
         if let Some(id) = current_id {
