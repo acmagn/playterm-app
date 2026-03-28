@@ -8,3 +8,9 @@ name = "playterm"
 path = "src/main.rs"
 
 [dependencies]
+anyhow = "1"
+crossterm = "0.28"
+playterm-player = { path = "../playterm-player" }
+playterm-subsonic = { path = "../playterm-subsonic" }
+ratatui = { version = "0.29", features = ["crossterm"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
