@@ -85,6 +85,8 @@ pub enum LibraryUpdate {
         songs: Vec<playterm_subsonic::Song>,
         start_playing: bool,
     },
+    /// Raw image bytes for a cover art ID fetched from Navidrome.
+    CoverArt { cover_id: String, bytes: Vec<u8> },
 }
 
 // ── App ───────────────────────────────────────────────────────────────────────
@@ -109,6 +111,12 @@ pub struct App {
     /// Active filter applied to the current browser column after a search confirm.
     /// `None` = show all items; `Some(q)` = show only items whose name contains `q`.
     pub search_filter: Option<String>,
+    /// Whether the running terminal supports the Kitty graphics protocol.
+    /// Set once by `main` before the TUI loop starts.
+    pub kitty_supported: bool,
+    /// Cached cover art: `(cover_art_id, raw_image_bytes)`.
+    /// Updated whenever a new track starts with a different cover ID.
+    pub art_cache: Option<(String, Vec<u8>)>,
 }
 
 impl App {
@@ -134,6 +142,8 @@ impl App {
             should_quit: false,
             search_mode: SearchMode::default(),
             search_filter: None,
+            kitty_supported: false,
+            art_cache: None,
         })
     }
 
@@ -177,6 +187,20 @@ impl App {
                 .map(|a| a.song)
                 .map_err(|e| e.to_string());
             let _ = tx.send(LibraryUpdate::Tracks { album_id, result }).await;
+        });
+    }
+
+    /// Spawn a task to fetch raw cover art bytes for the given cover art ID.
+    pub fn fetch_cover_art(&self, cover_id: String) {
+        let client = self.subsonic.clone();
+        let tx = self.library_tx.clone();
+        tokio::spawn(async move {
+            match client.get_cover_art(&cover_id).await {
+                Ok(bytes) => {
+                    let _ = tx.send(LibraryUpdate::CoverArt { cover_id, bytes }).await;
+                }
+                Err(e) => eprintln!("fetch_cover_art({cover_id}): {e}"),
+            }
         });
     }
 
@@ -272,6 +296,9 @@ impl App {
                     self.play_current();
                 }
             }
+            LibraryUpdate::CoverArt { cover_id, bytes } => {
+                self.art_cache = Some((cover_id, bytes));
+            }
         }
     }
 
@@ -282,6 +309,18 @@ impl App {
             PlayerEvent::TrackStarted => {
                 self.playback.paused = false;
                 if let Some(song) = self.queue.current().cloned() {
+                    // Fetch cover art when the track has one and it differs from cache.
+                    if self.kitty_supported {
+                        if let Some(cover_id) = &song.cover_art {
+                            let needs_fetch = self.art_cache
+                                .as_ref()
+                                .map(|(cached_id, _)| cached_id != cover_id)
+                                .unwrap_or(true);
+                            if needs_fetch {
+                                self.fetch_cover_art(cover_id.clone());
+                            }
+                        }
+                    }
                     self.playback.current_song = Some(song);
                 }
             }

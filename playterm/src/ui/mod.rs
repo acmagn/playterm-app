@@ -1,6 +1,7 @@
 pub mod albums;
 pub mod artists;
 pub mod browser;
+pub mod kitty_art;
 pub mod layout;
 pub mod now_playing;
 pub mod nowplaying_tab;

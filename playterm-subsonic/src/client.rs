@@ -262,6 +262,24 @@ impl SubsonicClient {
             .ok_or_else(|| anyhow!("missing 'searchResult3' field in search3 response"))
     }
 
+    /// Fetch raw cover art bytes for the given cover art ID (`getCoverArt`).
+    ///
+    /// Returns the raw image bytes (JPEG, PNG, etc.) as returned by Navidrome.
+    /// The `id` is the `cover_art` field on a `Song` or `Album`.
+    pub async fn get_cover_art(&self, id: &str) -> Result<Vec<u8>> {
+        let mut params = self.auth_params();
+        params.push(("id", id.to_string()));
+        let bytes = self
+            .http
+            .get(self.endpoint_url("getCoverArt"))
+            .query(&params)
+            .send()
+            .await?
+            .bytes()
+            .await?;
+        Ok(bytes.to_vec())
+    }
+
     /// Mark a song as played (scrobble).
     pub async fn scrobble(&self, id: &str) -> Result<()> {
         let mut params = self.auth_params();

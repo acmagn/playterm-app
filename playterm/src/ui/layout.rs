@@ -47,3 +47,16 @@ pub fn build_nowplaying(area: Rect) -> NowPlayingAreas {
         status_bar: chunks[2],
     }
 }
+
+/// Return the album-art widget rect given the full terminal size.
+///
+/// Replicates the NowPlaying layout calculation so that `main.rs` can compute
+/// the same area without going through a ratatui `Frame`.
+pub fn art_rect(terminal_size: Rect) -> Rect {
+    let areas = build_nowplaying(terminal_size);
+    Layout::horizontal([
+        Constraint::Percentage(50),
+        Constraint::Percentage(50),
+    ])
+    .split(areas.center)[0]
+}

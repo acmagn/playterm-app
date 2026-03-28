@@ -16,6 +16,7 @@ use crossterm::terminal::{
 };
 use crossterm::ExecutableCommand;
 use ratatui::backend::CrosstermBackend;
+use ratatui::layout::Rect;
 use ratatui::Terminal;
 
 use action::{Action, Direction};
@@ -29,6 +30,9 @@ async fn main() -> Result<()> {
         process::exit(1);
     });
     let mut app = App::new(config)?;
+
+    // Detect Kitty graphics support before entering raw mode / alternate screen.
+    app.kitty_supported = ui::kitty_art::detect_kitty_support();
 
     // Restore previous session state (selections, queue) before first render.
     if let Err(e) = persist::restore_state(&mut app) {
@@ -47,6 +51,11 @@ async fn main() -> Result<()> {
 
     let result = run_loop(&mut terminal, &mut app).await;
 
+    // Clear any Kitty images before leaving the alternate screen.
+    if app.kitty_supported {
+        let _ = ui::kitty_art::clear_image();
+    }
+
     // Restore terminal regardless of errors.
     disable_raw_mode()?;
     terminal.backend_mut().execute(LeaveAlternateScreen)?;
@@ -59,6 +68,11 @@ async fn run_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut App,
 ) -> Result<()> {
+    // Track which art was last rendered and at what area, to avoid redundant
+    // re-transmissions.
+    let mut last_rendered_art: Option<(String, Rect)> = None;
+    let mut last_tab = app.active_tab;
+
     loop {
         // Drain library updates from background tokio tasks.
         while let Ok(update) = app.library_rx.try_recv() {
@@ -71,19 +85,60 @@ async fn run_loop(
 
         terminal.draw(|f| ui::render(app, f))?;
 
-        // Poll for a key event (50 ms timeout keeps progress bar responsive).
-        if event::poll(Duration::from_millis(50))? {
-            if let Event::Key(key) = event::read()? {
-                // Only process key-press events; ignore release/repeat to avoid
-                // double-firing on terminals that send all event kinds (e.g. Kitty).
-                if key.kind == KeyEventKind::Press {
-                    let action = if app.search_mode.active {
-                        map_search_key(key.code)
-                    } else {
-                        map_key(key.code, key.modifiers)
-                    };
-                    app.dispatch(action);
+        // ── Kitty album art (rendered after ratatui so it sits above text) ──────
+        if app.kitty_supported {
+            if app.active_tab == app::Tab::NowPlaying {
+                if let Some((cover_id, bytes)) = &app.art_cache {
+                    let sz = terminal.size()?;
+                    let art_rect = ui::layout::art_rect(Rect::new(0, 0, sz.width, sz.height));
+                    let needs_render = last_rendered_art
+                        .as_ref()
+                        .map(|(id, r)| id != cover_id || r != &art_rect)
+                        .unwrap_or(true);
+                    if needs_render {
+                        match ui::kitty_art::render_image(bytes, art_rect) {
+                            Ok(()) => last_rendered_art = Some((cover_id.clone(), art_rect)),
+                            Err(e) => eprintln!("kitty render: {e}"),
+                        }
+                    }
+                } else if last_rendered_art.is_some() {
+                    // In NowPlaying tab but no art yet — clear any stale image.
+                    let _ = ui::kitty_art::clear_image();
+                    last_rendered_art = None;
                 }
+            } else if last_tab == app::Tab::NowPlaying {
+                // Just switched away from NowPlaying — clear the image.
+                if last_rendered_art.is_some() {
+                    let _ = ui::kitty_art::clear_image();
+                    last_rendered_art = None;
+                }
+            }
+        }
+        last_tab = app.active_tab;
+
+        // Poll for events (50 ms timeout keeps progress bar responsive).
+        if event::poll(Duration::from_millis(50))? {
+            match event::read()? {
+                Event::Key(key) => {
+                    // Only process key-press events; ignore release/repeat to avoid
+                    // double-firing on terminals that send all event kinds (e.g. Kitty).
+                    if key.kind == KeyEventKind::Press {
+                        let action = if app.search_mode.active {
+                            map_search_key(key.code)
+                        } else {
+                            map_key(key.code, key.modifiers)
+                        };
+                        app.dispatch(action);
+                    }
+                }
+                Event::Resize(_, _) => {
+                    // Clear cached render so the art is re-sent at the new dimensions.
+                    if app.kitty_supported && last_rendered_art.is_some() {
+                        let _ = ui::kitty_art::clear_image();
+                        last_rendered_art = None;
+                    }
+                }
+                _ => {}
             }
         }
 
