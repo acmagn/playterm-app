@@ -106,6 +106,9 @@ pub struct App {
     pub player_rx: std_mpsc::Receiver<PlayerEvent>,
     pub should_quit: bool,
     pub search_mode: SearchMode,
+    /// Active filter applied to the current browser column after a search confirm.
+    /// `None` = show all items; `Some(q)` = show only items whose name contains `q`.
+    pub search_filter: Option<String>,
 }
 
 impl App {
@@ -130,6 +133,7 @@ impl App {
             config,
             should_quit: false,
             search_mode: SearchMode::default(),
+            search_filter: None,
         })
     }
 
@@ -314,7 +318,10 @@ impl App {
     pub fn dispatch(&mut self, action: Action) {
         match action {
             Action::Quit => self.should_quit = true,
-            Action::SwitchTab => self.active_tab = self.active_tab.toggle(),
+            Action::SwitchTab => {
+                self.active_tab = self.active_tab.toggle();
+                self.search_filter = None;
+            }
             Action::FocusLeft => self.handle_focus_left(),
             Action::FocusRight => self.handle_focus_right(),
             Action::Navigate(dir) => self.handle_navigate(dir),
@@ -355,6 +362,8 @@ impl App {
                 self.search_mode.active = true;
                 self.search_mode.query.clear();
                 self.search_mode.selected = 0;
+                // Starting a new search clears the previous filter.
+                self.search_filter = None;
             }
             Action::SearchInput(ch) => {
                 if self.search_mode.active {
@@ -370,6 +379,12 @@ impl App {
             }
             Action::SearchConfirm => {
                 if self.search_mode.active {
+                    let q = self.search_mode.query.to_lowercase();
+                    if q.is_empty() {
+                        self.search_filter = None;
+                    } else {
+                        self.search_filter = Some(q);
+                    }
                     self.handle_search_confirm();
                     self.search_mode.active = false;
                     self.search_mode.query.clear();
@@ -379,6 +394,7 @@ impl App {
                 self.search_mode.active = false;
                 self.search_mode.query.clear();
                 self.search_mode.selected = 0;
+                self.search_filter = None;
             }
             Action::None => {}
         }
@@ -390,6 +406,7 @@ impl App {
         if self.active_tab != Tab::Browser {
             return;
         }
+        self.search_filter = None;
         match self.browser_focus {
             BrowserColumn::Artists => {
                 if let Some(artist) = self.library.current_artist() {
@@ -419,6 +436,7 @@ impl App {
         if self.active_tab != Tab::Browser {
             return;
         }
+        self.search_filter = None;
         self.browser_focus = self.browser_focus.left();
     }
 
@@ -434,29 +452,35 @@ impl App {
     fn handle_navigate_browser(&mut self, dir: Direction) {
         match self.browser_focus {
             BrowserColumn::Artists => {
-                // Extract new index and artist_id before any mutable borrows.
                 let result = if let LoadingState::Loaded(artists) = &self.library.artists {
-                    let len = artists.len();
-                    if len == 0 {
-                        return;
-                    }
-                    let cur = self.library.selected_artist.unwrap_or(0);
-                    let new_idx = match dir {
-                        Direction::Up => cur.saturating_sub(1),
-                        Direction::Down => (cur + 1).min(len - 1),
-                        Direction::Top => 0,
-                        Direction::Bottom => len - 1,
+                    // Build navigable index set — filtered or full.
+                    let indices: Vec<usize> = if let Some(q) = &self.search_filter {
+                        artists.iter().enumerate()
+                            .filter(|(_, a)| a.name.to_lowercase().contains(q.as_str()))
+                            .map(|(i, _)| i)
+                            .collect()
+                    } else {
+                        (0..artists.len()).collect()
                     };
-                    Some((new_idx, artists[new_idx].id.clone()))
+                    if indices.is_empty() { return; }
+                    let cur_pos = self.library.selected_artist
+                        .and_then(|sel| indices.iter().position(|&i| i == sel))
+                        .unwrap_or(0);
+                    let new_pos = match dir {
+                        Direction::Up => cur_pos.saturating_sub(1),
+                        Direction::Down => (cur_pos + 1).min(indices.len() - 1),
+                        Direction::Top => 0,
+                        Direction::Bottom => indices.len() - 1,
+                    };
+                    let new_orig = indices[new_pos];
+                    Some((new_orig, artists[new_orig].id.clone()))
                 } else {
                     None
                 };
                 if let Some((new_idx, artist_id)) = result {
                     self.library.selected_artist = Some(new_idx);
-                    // Reset downstream selections when artist changes.
                     self.library.selected_album = Some(0);
                     self.library.selected_track = Some(0);
-                    // Proactively fetch albums for the newly highlighted artist.
                     if !self.library.albums.contains_key(&artist_id) {
                         self.library.albums.insert(artist_id.clone(), LoadingState::Loading);
                         self.fetch_albums(artist_id);
@@ -470,18 +494,26 @@ impl App {
                         None => return,
                     };
                     if let Some(LoadingState::Loaded(albums)) = self.library.albums.get(&artist_id) {
-                        let len = albums.len();
-                        if len == 0 {
-                            return;
-                        }
-                        let cur = self.library.selected_album.unwrap_or(0);
-                        let new_idx = match dir {
-                            Direction::Up => cur.saturating_sub(1),
-                            Direction::Down => (cur + 1).min(len - 1),
-                            Direction::Top => 0,
-                            Direction::Bottom => len - 1,
+                        let indices: Vec<usize> = if let Some(q) = &self.search_filter {
+                            albums.iter().enumerate()
+                                .filter(|(_, a)| a.name.to_lowercase().contains(q.as_str()))
+                                .map(|(i, _)| i)
+                                .collect()
+                        } else {
+                            (0..albums.len()).collect()
                         };
-                        Some((new_idx, albums[new_idx].id.clone()))
+                        if indices.is_empty() { return; }
+                        let cur_pos = self.library.selected_album
+                            .and_then(|sel| indices.iter().position(|&i| i == sel))
+                            .unwrap_or(0);
+                        let new_pos = match dir {
+                            Direction::Up => cur_pos.saturating_sub(1),
+                            Direction::Down => (cur_pos + 1).min(indices.len() - 1),
+                            Direction::Top => 0,
+                            Direction::Bottom => indices.len() - 1,
+                        };
+                        let new_orig = indices[new_pos];
+                        Some((new_orig, albums[new_orig].id.clone()))
                     } else {
                         None
                     }
@@ -489,7 +521,6 @@ impl App {
                 if let Some((new_idx, album_id)) = result {
                     self.library.selected_album = Some(new_idx);
                     self.library.selected_track = Some(0);
-                    // Proactively fetch tracks for the newly highlighted album.
                     if !self.library.tracks.contains_key(&album_id) {
                         self.library.tracks.insert(album_id.clone(), LoadingState::Loading);
                         self.fetch_tracks(album_id);
@@ -502,17 +533,25 @@ impl App {
                     None => return,
                 };
                 if let Some(LoadingState::Loaded(songs)) = self.library.tracks.get(&album_id) {
-                    let len = songs.len();
-                    if len == 0 {
-                        return;
-                    }
-                    let cur = self.library.selected_track.unwrap_or(0);
-                    self.library.selected_track = Some(match dir {
-                        Direction::Up => cur.saturating_sub(1),
-                        Direction::Down => (cur + 1).min(len - 1),
+                    let indices: Vec<usize> = if let Some(q) = &self.search_filter {
+                        songs.iter().enumerate()
+                            .filter(|(_, s)| s.title.to_lowercase().contains(q.as_str()))
+                            .map(|(i, _)| i)
+                            .collect()
+                    } else {
+                        (0..songs.len()).collect()
+                    };
+                    if indices.is_empty() { return; }
+                    let cur_pos = self.library.selected_track
+                        .and_then(|sel| indices.iter().position(|&i| i == sel))
+                        .unwrap_or(0);
+                    let new_pos = match dir {
+                        Direction::Up => cur_pos.saturating_sub(1),
+                        Direction::Down => (cur_pos + 1).min(indices.len() - 1),
                         Direction::Top => 0,
-                        Direction::Bottom => len - 1,
-                    });
+                        Direction::Bottom => indices.len() - 1,
+                    };
+                    self.library.selected_track = Some(indices[new_pos]);
                 }
             }
         }

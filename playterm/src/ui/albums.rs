@@ -6,6 +6,7 @@ use ratatui::widgets::{Block, BorderType, Borders, List, ListItem, ListState};
 use crate::app::App;
 use crate::state::LoadingState;
 use super::{ACCENT, BG, BORDER, BORDER_ACTIVE, SURFACE, TEXT, TEXT_MUTED};
+use playterm_subsonic::Album;
 
 pub fn render(app: &App, frame: &mut Frame, area: Rect, is_active: bool) {
     let border_color = if is_active { BORDER_ACTIVE } else { BORDER };
@@ -43,16 +44,30 @@ pub fn render(app: &App, frame: &mut Frame, area: Rect, is_active: bool) {
             frame.render_widget(list, area);
         }
         Some(LoadingState::Loaded(albums)) => {
-            let items: Vec<ListItem> = albums
-                .iter()
-                .map(|a| {
-                    let label = match a.year {
-                        Some(y) => format!("{} ({})", a.name, y),
-                        None => a.name.clone(),
-                    };
-                    ListItem::new(label).style(Style::default().fg(TEXT))
-                })
-                .collect();
+            let make_label = |a: &Album| match a.year {
+                Some(y) => format!("{} ({})", a.name, y),
+                None => a.name.clone(),
+            };
+
+            let visible: Vec<(usize, String)> = if let Some(q) = &app.search_filter {
+                albums.iter().enumerate()
+                    .filter(|(_, a)| a.name.to_lowercase().contains(q.as_str()))
+                    .map(|(i, a)| (i, make_label(a)))
+                    .collect()
+            } else {
+                albums.iter().enumerate().map(|(i, a)| (i, make_label(a))).collect()
+            };
+
+            let items: Vec<ListItem> = if visible.is_empty() {
+                vec![ListItem::new("No matches").style(Style::default().fg(TEXT_MUTED))]
+            } else {
+                visible.iter()
+                    .map(|(_, label)| ListItem::new(label.as_str()).style(Style::default().fg(TEXT)))
+                    .collect()
+            };
+
+            let sel = app.library.selected_album
+                .and_then(|s| visible.iter().position(|(i, _)| *i == s));
 
             let list = List::new(items)
                 .block(block)
@@ -66,7 +81,7 @@ pub fn render(app: &App, frame: &mut Frame, area: Rect, is_active: bool) {
                 .style(Style::default().bg(SURFACE));
 
             let mut state = ListState::default();
-            state.select(app.library.selected_album);
+            state.select(sel);
             frame.render_stateful_widget(list, area, &mut state);
         }
     }

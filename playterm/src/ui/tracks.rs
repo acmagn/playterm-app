@@ -47,19 +47,35 @@ pub fn render(app: &App, frame: &mut Frame, area: Rect, is_active: bool) {
             frame.render_widget(list, area);
         }
         Some(LoadingState::Loaded(songs)) => {
-            let items: Vec<ListItem> = songs
-                .iter()
-                .map(|s| {
-                    let num = s.track.map(|n| format!("{n:>2}. ")).unwrap_or_default();
-                    let dur = s.duration.map(|d| {
-                        let m = d / 60;
-                        let s = d % 60;
-                        format!("  {m}:{s:02}")
-                    }).unwrap_or_default();
-                    let label = format!("{}{}{}", num, s.title, dur);
-                    ListItem::new(label).style(Style::default().fg(TEXT))
-                })
-                .collect();
+            let make_label = |s: &playterm_subsonic::Song| {
+                let num = s.track.map(|n| format!("{n:>2}. ")).unwrap_or_default();
+                let dur = s.duration.map(|d| {
+                    let m = d / 60;
+                    let sec = d % 60;
+                    format!("  {m}:{sec:02}")
+                }).unwrap_or_default();
+                format!("{}{}{}", num, s.title, dur)
+            };
+
+            let visible: Vec<(usize, String)> = if let Some(q) = &app.search_filter {
+                songs.iter().enumerate()
+                    .filter(|(_, s)| s.title.to_lowercase().contains(q.as_str()))
+                    .map(|(i, s)| (i, make_label(s)))
+                    .collect()
+            } else {
+                songs.iter().enumerate().map(|(i, s)| (i, make_label(s))).collect()
+            };
+
+            let items: Vec<ListItem> = if visible.is_empty() {
+                vec![ListItem::new("No matches").style(Style::default().fg(TEXT_MUTED))]
+            } else {
+                visible.iter()
+                    .map(|(_, label)| ListItem::new(label.as_str()).style(Style::default().fg(TEXT)))
+                    .collect()
+            };
+
+            let sel = app.library.selected_track
+                .and_then(|s| visible.iter().position(|(i, _)| *i == s));
 
             let list = List::new(items)
                 .block(block)
@@ -73,7 +89,7 @@ pub fn render(app: &App, frame: &mut Frame, area: Rect, is_active: bool) {
                 .style(Style::default().bg(SURFACE));
 
             let mut state = ListState::default();
-            state.select(app.library.selected_track);
+            state.select(sel);
             frame.render_stateful_widget(list, area, &mut state);
         }
     }

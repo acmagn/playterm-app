@@ -10,7 +10,7 @@ use std::process;
 use std::time::Duration;
 
 use anyhow::Result;
-use crossterm::event::{self, Event, KeyCode, KeyModifiers};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
@@ -74,12 +74,16 @@ async fn run_loop(
         // Poll for a key event (50 ms timeout keeps progress bar responsive).
         if event::poll(Duration::from_millis(50))? {
             if let Event::Key(key) = event::read()? {
-                let action = if app.search_mode.active {
-                    map_search_key(key.code)
-                } else {
-                    map_key(key.code, key.modifiers)
-                };
-                app.dispatch(action);
+                // Only process key-press events; ignore release/repeat to avoid
+                // double-firing on terminals that send all event kinds (e.g. Kitty).
+                if key.kind == KeyEventKind::Press {
+                    let action = if app.search_mode.active {
+                        map_search_key(key.code)
+                    } else {
+                        map_key(key.code, key.modifiers)
+                    };
+                    app.dispatch(action);
+                }
             }
         }
 

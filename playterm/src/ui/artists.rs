@@ -31,10 +31,27 @@ pub fn render(app: &App, frame: &mut Frame, area: Rect, is_active: bool) {
             frame.render_widget(list, area);
         }
         LoadingState::Loaded(artists) => {
-            let items: Vec<ListItem> = artists
-                .iter()
-                .map(|a| ListItem::new(a.name.as_str()).style(Style::default().fg(TEXT)))
-                .collect();
+            // Build (original_index, name) pairs, filtered when search is active.
+            let visible: Vec<(usize, &str)> = if let Some(q) = &app.search_filter {
+                artists.iter().enumerate()
+                    .filter(|(_, a)| a.name.to_lowercase().contains(q.as_str()))
+                    .map(|(i, a)| (i, a.name.as_str()))
+                    .collect()
+            } else {
+                artists.iter().enumerate().map(|(i, a)| (i, a.name.as_str())).collect()
+            };
+
+            let items: Vec<ListItem> = if visible.is_empty() {
+                vec![ListItem::new("No matches").style(Style::default().fg(TEXT_MUTED))]
+            } else {
+                visible.iter()
+                    .map(|(_, name)| ListItem::new(*name).style(Style::default().fg(TEXT)))
+                    .collect()
+            };
+
+            // Find where the currently selected artist sits in the visible list.
+            let sel = app.library.selected_artist
+                .and_then(|s| visible.iter().position(|(i, _)| *i == s));
 
             let list = List::new(items)
                 .block(block)
@@ -48,7 +65,7 @@ pub fn render(app: &App, frame: &mut Frame, area: Rect, is_active: bool) {
                 .style(Style::default().bg(SURFACE));
 
             let mut state = ListState::default();
-            state.select(app.library.selected_artist);
+            state.select(sel);
             frame.render_stateful_widget(list, area, &mut state);
         }
     }
