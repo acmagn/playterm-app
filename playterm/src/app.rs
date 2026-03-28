@@ -288,7 +288,11 @@ impl App {
             }
             LibraryUpdate::AllTracksForArtist { mut songs, start_playing } => {
                 let was_empty = self.queue.songs.is_empty();
-                songs.sort_by_key(|s| (s.disc_number.unwrap_or(1), s.track.unwrap_or(0)));
+                songs.sort_by_key(|s| (
+                    s.album_id.clone().unwrap_or_default(),
+                    s.disc_number.unwrap_or(1),
+                    s.track.unwrap_or(0),
+                ));
                 for song in songs {
                     self.queue.push(song);
                 }
