@@ -4,7 +4,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::widgets::{Block, BorderType, Borders, List, ListItem, ListState};
 
 use crate::app::App;
-use super::{ACCENT, BG, BORDER, BORDER_ACTIVE, SURFACE, TEXT, TEXT_MUTED};
+use super::{ACCENT, BORDER, BORDER_ACTIVE, SURFACE, TEXT, TEXT_MUTED};
 
 pub fn render(app: &App, frame: &mut Frame, area: Rect, is_active: bool) {
     let border_color = if is_active { BORDER_ACTIVE } else { BORDER };
@@ -33,17 +33,26 @@ pub fn render(app: &App, frame: &mut Frame, area: Rect, is_active: bool) {
         return;
     }
 
-    let cursor = app.queue.cursor;
     let items: Vec<ListItem> = app.queue.songs.iter().enumerate().map(|(i, s)| {
-        let marker = if i == cursor { "▶ " } else { "  " };
-        let artist = s.artist.as_deref().unwrap_or("");
-        let dur = s.duration.map(|d| {
-            let m = d / 60;
-            let sec = d % 60;
-            format!("  {m}:{sec:02}")
-        }).unwrap_or_default();
-        let label = format!("{}{} — {}{}", marker, s.title, artist, dur);
-        let style = if i == cursor {
+        // Track number: 4 chars right-aligned ("  1.")
+        let num = s.track
+            .map(|n| format!("{n:>3}."))
+            .unwrap_or_else(|| "    ".to_string());
+
+        // Title: 40 chars, left-aligned, truncated with …
+        let title_col = format!("{:<40}", trunc(&s.title, 40));
+
+        // Artist: 25 chars, left-aligned, truncated with …
+        let artist_col = format!("{:<25}", trunc(s.artist.as_deref().unwrap_or(""), 25));
+
+        // Duration: 5 chars right-aligned (" 3:04")
+        let dur = s.duration
+            .map(|d| format!("{:>5}", format!("{}:{:02}", d / 60, d % 60)))
+            .unwrap_or_else(|| "     ".to_string());
+
+        let label = format!("{}  {}  {}  {}", num, title_col, artist_col, dur);
+
+        let style = if i == app.queue.cursor {
             Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(TEXT)
@@ -53,10 +62,32 @@ pub fn render(app: &App, frame: &mut Frame, area: Rect, is_active: bool) {
 
     let list = List::new(items)
         .block(block)
-        .highlight_style(Style::default().bg(ACCENT).fg(BG).add_modifier(Modifier::BOLD))
+        // highlight_style: accent text on current track row, no bg change
+        .highlight_style(Style::default().fg(ACCENT).add_modifier(Modifier::BOLD))
         .style(Style::default().bg(SURFACE));
 
     let mut state = ListState::default().with_offset(app.queue.scroll);
     state.select(Some(app.queue.cursor));
     frame.render_stateful_widget(list, area, &mut state);
+}
+
+/// Truncate `s` to at most `max` Unicode characters, appending `…` if cut.
+fn trunc(s: &str, max: usize) -> String {
+    let mut chars = s.chars();
+    let mut result = String::with_capacity(max);
+    let mut count = 0;
+    for ch in chars.by_ref() {
+        if count >= max - 1 {
+            // Check if there are more characters coming.
+            if chars.next().is_some() {
+                result.push('…');
+            } else {
+                result.push(ch);
+            }
+            return result;
+        }
+        result.push(ch);
+        count += 1;
+    }
+    result
 }

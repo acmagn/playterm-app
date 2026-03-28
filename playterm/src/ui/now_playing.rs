@@ -2,10 +2,10 @@ use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Gauge, Paragraph};
+use ratatui::widgets::Paragraph;
 
 use crate::app::App;
-use super::{ACCENT, BG, SURFACE, TEXT_MUTED};
+use super::{ACCENT, SURFACE, TEXT_MUTED};
 
 // ── Top-level: 3-column Spotify-style bar ────────────────────────────────────
 
@@ -15,7 +15,7 @@ pub fn render(app: &App, frame: &mut Frame, area: Rect) {
         .constraints([
             Constraint::Percentage(30), // track info
             Constraint::Percentage(40), // transport controls
-            Constraint::Percentage(30), // progress + time
+            Constraint::Percentage(30), // inline progress
         ])
         .split(area);
 
@@ -62,35 +62,33 @@ fn render_track_info(app: &App, frame: &mut Frame, area: Rect) {
 }
 
 // ── Center 40%: transport controls, centered ─────────────────────────────────
+//
+// Target: ⇄      ⏮      ( ⏸ )      ⏭      ↻
+//         4-6 spaces between each symbol; play/pause bracketed + accent.
 
 fn render_controls(app: &App, frame: &mut Frame, area: Rect) {
-    // Play/pause button: bracketed + accent when a song is loaded, muted otherwise.
     let (play_label, play_style) = if app.playback.current_song.is_none() {
-        (
-            "  ▶  ",
-            Style::default().fg(TEXT_MUTED),
-        )
+        ("▶", Style::default().fg(TEXT_MUTED))
     } else if app.playback.paused {
-        (
-            "( ▶ )",
-            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
-        )
+        ("( ▶ )", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD))
     } else {
-        (
-            "( ⏸ )",
-            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
-        )
+        ("( ⏸ )", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD))
     };
 
+    let sep = Style::default().fg(TEXT_MUTED);
     let controls = Line::from(vec![
-        Span::styled("  ⇄  ", Style::default().fg(TEXT_MUTED)),
-        Span::styled("  ⏮  ", Style::default().fg(TEXT_MUTED)),
+        Span::styled("⇄", sep),
+        Span::raw("      "),
+        Span::styled("⏮", sep),
+        Span::raw("      "),
         Span::styled(play_label, play_style),
-        Span::styled("  ⏭  ", Style::default().fg(TEXT_MUTED)),
-        Span::styled("  ↻  ", Style::default().fg(TEXT_MUTED)),
+        Span::raw("      "),
+        Span::styled("⏭", sep),
+        Span::raw("      "),
+        Span::styled("↻", sep),
     ]);
 
-    // Vertically: 1 blank row, controls row, 2 blank rows → sits at row 1 of 4.
+    // Place controls on row 1 of 4 (1 blank row above for visual centering).
     let lines: Vec<Line> = vec![
         Line::from(""),
         controls,
@@ -106,61 +104,53 @@ fn render_controls(app: &App, frame: &mut Frame, area: Rect) {
     );
 }
 
-// ── Right 30%: progress gauge + elapsed / total ───────────────────────────────
+// ── Right 30%: inline progress "elapsed  ████░░░░  total" ────────────────────
+//
+// No Gauge widget — bar is built as a string of █ (ACCENT) and ░ (TEXT_MUTED)
+// sized to fit the column width.  Placed on row 2 of 4.
 
 fn render_progress(app: &App, frame: &mut Frame, area: Rect) {
-    // Vertical: top pad | gauge | time text | bottom fill
-    let rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1), // top padding
-            Constraint::Length(1), // progress gauge
-            Constraint::Length(1), // elapsed / total
-            Constraint::Min(0),    // bottom fill
-        ])
-        .split(area);
-
-    // Background fill for padding rows
-    let fill_style = Style::default().bg(SURFACE);
-    frame.render_widget(Paragraph::new("").style(fill_style), rows[0]);
-    if rows[3].height > 0 {
-        frame.render_widget(Paragraph::new("").style(fill_style), rows[3]);
-    }
-
-    // Gauge (no embedded label — time is on its own row below)
-    let ratio = match (&app.playback.current_song, app.playback.total) {
-        (Some(_), Some(total)) if !total.is_zero() => {
-            (app.playback.elapsed.as_secs_f64() / total.as_secs_f64()).clamp(0.0, 1.0)
-        }
-        _ => 0.0,
+    let (elapsed_str, total_str, ratio) = if let Some(_) = &app.playback.current_song {
+        let e = app.playback.elapsed.as_secs();
+        let elapsed_str = format!("{}:{:02}", e / 60, e % 60);
+        let (total_str, ratio) = match app.playback.total {
+            Some(t) => {
+                let ts = t.as_secs();
+                let r = if ts > 0 { (e as f64 / ts as f64).clamp(0.0, 1.0) } else { 0.0 };
+                (format!("{}:{:02}", ts / 60, ts % 60), r)
+            }
+            None => ("--:--".to_string(), 0.0),
+        };
+        (elapsed_str, total_str, ratio)
+    } else {
+        ("0:00".to_string(), "0:00".to_string(), 0.0)
     };
-    frame.render_widget(
-        Gauge::default()
-            .style(Style::default().bg(SURFACE))
-            .gauge_style(Style::default().bg(ACCENT).fg(BG))
-            .ratio(ratio),
-        rows[1],
-    );
 
-    // Time: right-aligned, small padding on the right edge
-    let elapsed = app.playback.elapsed.as_secs();
-    let time_str = match app.playback.total {
-        Some(t) => {
-            let ts = t.as_secs();
-            format!(
-                "{}:{:02}  ·  {}:{:02}  ",
-                elapsed / 60,
-                elapsed % 60,
-                ts / 60,
-                ts % 60,
-            )
-        }
-        None => format!("{}:{:02}  ", elapsed / 60, elapsed % 60),
-    };
+    // Bar width: column width minus elapsed, total, and two 2-space gaps.
+    let col_w = area.width as usize;
+    let bar_w = col_w.saturating_sub(elapsed_str.len() + total_str.len() + 4);
+    let filled = ((ratio * bar_w as f64) as usize).min(bar_w);
+    let empty = bar_w - filled;
+
+    let progress = Line::from(vec![
+        Span::styled(elapsed_str, Style::default().fg(TEXT_MUTED)),
+        Span::raw("  "),
+        Span::styled("█".repeat(filled), Style::default().fg(ACCENT)),
+        Span::styled("░".repeat(empty), Style::default().fg(TEXT_MUTED)),
+        Span::raw("  "),
+        Span::styled(total_str, Style::default().fg(TEXT_MUTED)),
+    ]);
+
+    // Row 0: empty, Row 1: empty, Row 2: progress, Row 3: empty.
+    let lines: Vec<Line> = vec![
+        Line::from(""),
+        Line::from(""),
+        progress,
+        Line::from(""),
+    ];
+
     frame.render_widget(
-        Paragraph::new(time_str)
-            .alignment(Alignment::Right)
-            .style(Style::default().fg(TEXT_MUTED).bg(SURFACE)),
-        rows[2],
+        Paragraph::new(lines).style(Style::default().bg(SURFACE)),
+        area,
     );
 }
