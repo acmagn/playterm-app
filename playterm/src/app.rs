@@ -16,8 +16,9 @@ use crate::theme::Theme;
 
 // ── Tab ───────────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Tab {
+    #[default]
     Browser,
     NowPlaying,
 }
@@ -33,8 +34,9 @@ impl Tab {
 
 // ── BrowserColumn ─────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BrowserColumn {
+    #[default]
     Artists,
     Albums,
     Tracks,
@@ -248,12 +250,21 @@ impl App {
             LibraryUpdate::Artists(result) => {
                 self.library.artists = match result {
                     Ok(artists) => {
-                        if self.library.selected_artist.is_none() && !artists.is_empty() {
-                            self.library.selected_artist = Some(0);
-                            // Proactively fetch albums for the first artist.
-                            let first_id = artists[0].id.clone();
-                            self.library.albums.insert(first_id.clone(), LoadingState::Loading);
-                            self.fetch_albums(first_id);
+                        if !artists.is_empty() {
+                            // Default to 0 on fresh start; restore keeps whatever was saved.
+                            if self.library.selected_artist.is_none() {
+                                self.library.selected_artist = Some(0);
+                            }
+                            // Clamp restored index to actual list size.
+                            let idx = self.library.selected_artist.unwrap()
+                                .min(artists.len() - 1);
+                            self.library.selected_artist = Some(idx);
+                            // Fetch albums for the selected (or restored) artist.
+                            let artist_id = artists[idx].id.clone();
+                            if !self.library.albums.contains_key(&artist_id) {
+                                self.library.albums.insert(artist_id.clone(), LoadingState::Loading);
+                                self.fetch_albums(artist_id);
+                            }
                         }
                         LoadingState::Loaded(artists)
                     }
@@ -261,40 +272,75 @@ impl App {
                 };
             }
             LibraryUpdate::Albums { artist_id, result } => {
+                // Is this update for the currently-selected artist?
+                let is_selected_artist = self.library.selected_artist
+                    .and_then(|idx| {
+                        if let LoadingState::Loaded(artists) = &self.library.artists {
+                            artists.get(idx).map(|a| a.id == artist_id)
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or(false);
+
                 self.library.albums.insert(
                     artist_id,
                     match result {
-                        Ok(albums) => {
-                            // Proactively fetch tracks for the first album.
-                            if !albums.is_empty() {
+                        Ok(albums) if !albums.is_empty() => {
+                            if is_selected_artist {
+                                // Use restored selection (default 0), clamped to list size.
+                                if self.library.selected_album.is_none() {
+                                    self.library.selected_album = Some(0);
+                                }
+                                let idx = self.library.selected_album.unwrap()
+                                    .min(albums.len() - 1);
+                                self.library.selected_album = Some(idx);
+                                let album_id = albums[idx].id.clone();
+                                if !self.library.tracks.contains_key(&album_id) {
+                                    self.library.tracks.insert(album_id.clone(), LoadingState::Loading);
+                                    self.fetch_tracks(album_id);
+                                }
+                            } else {
+                                // Background prefetch: fetch tracks for first album.
+                                if self.library.selected_album.is_none() {
+                                    self.library.selected_album = Some(0);
+                                }
                                 let first_id = albums[0].id.clone();
                                 if !self.library.tracks.contains_key(&first_id) {
-                                    self.library
-                                        .tracks
-                                        .insert(first_id.clone(), LoadingState::Loading);
+                                    self.library.tracks.insert(first_id.clone(), LoadingState::Loading);
                                     self.fetch_tracks(first_id);
                                 }
                             }
                             LoadingState::Loaded(albums)
                         }
+                        Ok(albums) => LoadingState::Loaded(albums),
                         Err(e) => LoadingState::Error(e),
                     },
                 );
-                if self.library.selected_album.is_none() {
-                    self.library.selected_album = Some(0);
-                }
             }
             LibraryUpdate::Tracks { album_id, result } => {
-                self.library.tracks.insert(
-                    album_id,
-                    match result {
-                        Ok(songs) => LoadingState::Loaded(songs),
-                        Err(e) => LoadingState::Error(e),
-                    },
-                );
-                if self.library.selected_track.is_none() {
-                    self.library.selected_track = Some(0);
-                }
+                // Is this update for the currently-selected album?
+                let is_current_album = self.library.current_album()
+                    .map(|a| a.id == album_id)
+                    .unwrap_or(false);
+                let loaded = match result {
+                    Ok(songs) => {
+                        if is_current_album && !songs.is_empty() {
+                            // Clamp restored index (or default to 0) to actual song count.
+                            if self.library.selected_track.is_none() {
+                                self.library.selected_track = Some(0);
+                            }
+                            let idx = self.library.selected_track.unwrap()
+                                .min(songs.len() - 1);
+                            self.library.selected_track = Some(idx);
+                        } else if self.library.selected_track.is_none() {
+                            self.library.selected_track = Some(0);
+                        }
+                        LoadingState::Loaded(songs)
+                    }
+                    Err(e) => LoadingState::Error(e),
+                };
+                self.library.tracks.insert(album_id, loaded);
             }
             LibraryUpdate::AllTracksForArtist { mut songs, start_playing } => {
                 let was_empty = self.queue.songs.is_empty();

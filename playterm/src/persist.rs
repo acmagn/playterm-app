@@ -11,12 +11,19 @@ use crate::app::{App, BrowserColumn, Tab};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SavedState {
+    #[serde(default)]
     pub active_tab: Tab,
+    #[serde(default)]
     pub browser_focus: BrowserColumn,
+    #[serde(default)]
     pub selected_artist: Option<usize>,
+    #[serde(default)]
     pub selected_album: Option<usize>,
+    #[serde(default)]
     pub selected_track: Option<usize>,
+    #[serde(default)]
     pub queue: Vec<Song>,
+    #[serde(default)]
     pub queue_cursor: usize,
 }
 
