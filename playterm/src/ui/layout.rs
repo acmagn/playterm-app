@@ -12,13 +12,13 @@ pub struct NowPlayingAreas {
     pub status_bar: Rect,
 }
 
-/// Browser tab: columns (fill) | now-playing bar (3) | status bar (1).
+/// Browser tab: columns (fill) | now-playing bar (4) | status bar (1).
 pub fn build_browser(area: Rect) -> BrowserAreas {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(0),    // three-column browser
-            Constraint::Length(3), // persistent now-playing bar
+            Constraint::Length(4), // persistent now-playing bar
             Constraint::Length(1), // status bar
         ])
         .split(area);
@@ -30,13 +30,13 @@ pub fn build_browser(area: Rect) -> BrowserAreas {
     }
 }
 
-/// NowPlaying tab: art + queue (fill) | now-playing bar (3) | status bar (1).
+/// NowPlaying tab: art + queue (fill) | now-playing bar (4) | status bar (1).
 pub fn build_nowplaying(area: Rect) -> NowPlayingAreas {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(0),    // art placeholder + queue
-            Constraint::Length(3), // persistent now-playing bar
+            Constraint::Length(4), // persistent now-playing bar
             Constraint::Length(1), // status bar
         ])
         .split(area);
