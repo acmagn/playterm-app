@@ -1,6 +1,8 @@
 use std::sync::{Arc, mpsc as std_mpsc};
+use std::time::Instant;
 
 use anyhow::Result;
+use ratatui::style::Color;
 use tokio::sync::mpsc;
 
 use playterm_player::{PlayerCommand, PlayerEvent, spawn_player};
@@ -9,6 +11,7 @@ use playterm_subsonic::SubsonicClient;
 use serde::{Deserialize, Serialize};
 
 use crate::action::{Action, Direction};
+use crate::color::{extract_accent, lerp_color};
 use crate::config::Config;
 use crate::keybinds::Keybinds;
 use crate::state::{LibraryState, LoadingState, PlaybackState, QueueState};
@@ -51,6 +54,7 @@ impl BrowserColumn {
         }
     }
 
+    #[allow(dead_code)]
     pub fn right(self) -> Self {
         match self {
             BrowserColumn::Artists => BrowserColumn::Albums,
@@ -128,6 +132,20 @@ pub struct App {
     /// Monotonically increasing counter sent with every `PlayerCommand::PlayUrl`.
     /// The engine uses it to discard stale downloads from rapid skips.
     play_gen: u64,
+
+    // ── Dynamic accent (Feature 5.1) ──────────────────────────────────────────
+    /// Dominant colour extracted from the current track's album art.
+    /// `None` = no art / no suitable colour found.
+    pub dynamic_accent: Option<Color>,
+    /// Currently displayed accent — interpolates toward `dynamic_accent` over 400 ms.
+    /// Initialised to `theme.accent`; updated each render tick.
+    pub accent_current: Color,
+    /// Accent value at the start of the current transition.
+    accent_lerp_from: Color,
+    /// Target accent for the current transition.
+    accent_target: Color,
+    /// When the current colour transition started. `None` = no active transition.
+    pub accent_transition_start: Option<Instant>,
 }
 
 impl App {
@@ -140,6 +158,7 @@ impl App {
         let _ = player_tx.send(PlayerCommand::SetVolume(config.default_volume as f32 / 100.0));
         let keybinds = Keybinds::from_section(&config.keybinds);
         let theme    = Theme::from_section(&config.theme);
+        let static_accent = theme.accent;
         Ok(Self {
             active_tab: Tab::Browser,
             browser_focus: BrowserColumn::Artists,
@@ -160,7 +179,58 @@ impl App {
             keybinds,
             theme,
             play_gen: 0,
+            dynamic_accent: None,
+            accent_current: static_accent,
+            accent_lerp_from: static_accent,
+            accent_target: static_accent,
+            accent_transition_start: None,
         })
+    }
+
+    // ── Accent colour helpers ─────────────────────────────────────────────────
+
+    /// The accent colour to use at render time.
+    /// Returns `accent_current` (the OKLab-interpolated value) when dynamic
+    /// mode is on, otherwise the static configured accent.
+    pub fn accent(&self) -> Color {
+        // Pass `accent_current` as the dynamic value — `effective_accent`
+        // uses it when `theme.dynamic` is true, else falls back to static accent.
+        self.theme.effective_accent(if self.theme.dynamic {
+            Some(self.accent_current)
+        } else {
+            None
+        })
+    }
+
+    /// Returns true while a colour transition is in progress.
+    pub fn accent_transition_active(&self) -> bool {
+        self.accent_transition_start.is_some()
+    }
+
+    /// Call once per render tick to advance the colour interpolation.
+    pub fn tick_accent_transition(&mut self) {
+        if let Some(start) = self.accent_transition_start {
+            let t = start.elapsed().as_secs_f32() / 0.4;
+            if t >= 1.0 {
+                self.accent_current = self.accent_target;
+                self.accent_transition_start = None;
+            } else {
+                self.accent_current = lerp_color(self.accent_lerp_from, self.accent_target, t);
+            }
+        }
+    }
+
+    /// Set the dynamic accent, kicking off a transition if dynamic mode is on.
+    fn apply_dynamic_accent(&mut self, color: Option<Color>) {
+        self.dynamic_accent = color;
+        if self.theme.dynamic {
+            let target = color.unwrap_or(self.theme.accent);
+            if target != self.accent_target {
+                self.accent_lerp_from = self.accent_current;
+                self.accent_target = target;
+                self.accent_transition_start = Some(Instant::now());
+            }
+        }
     }
 
     // ── Background fetch helpers ──────────────────────────────────────────────
@@ -362,7 +432,10 @@ impl App {
                 }
             }
             LibraryUpdate::CoverArt { cover_id, bytes } => {
+                // Extract dynamic accent before storing (bytes are consumed here).
+                let accent = extract_accent(&bytes);
                 self.art_cache = Some((cover_id, bytes));
+                self.apply_dynamic_accent(accent);
             }
         }
     }
@@ -375,16 +448,25 @@ impl App {
                 self.playback.paused = false;
                 if let Some(song) = self.queue.current().cloned() {
                     // Fetch cover art when the track has one and it differs from cache.
-                    if self.kitty_supported {
-                        if let Some(cover_id) = &song.cover_art {
-                            let needs_fetch = self.art_cache
-                                .as_ref()
-                                .map(|(cached_id, _)| cached_id != cover_id)
-                                .unwrap_or(true);
-                            if needs_fetch {
-                                self.fetch_cover_art(cover_id.clone());
-                            }
+                    let cover_id = song.cover_art.clone();
+                    if let Some(ref cid) = cover_id {
+                        let needs_fetch = self.art_cache
+                            .as_ref()
+                            .map(|(cached_id, _)| cached_id != cid)
+                            .unwrap_or(true);
+                        if needs_fetch {
+                            // Art will arrive via CoverArt library update — accent
+                            // is applied there.  Clear stale dynamic accent for now.
+                            self.apply_dynamic_accent(None);
+                            self.fetch_cover_art(cid.clone());
+                        } else if let Some((_, ref bytes)) = self.art_cache.clone() {
+                            // Art already cached for this cover_id — extract immediately.
+                            let accent = extract_accent(bytes);
+                            self.apply_dynamic_accent(accent);
                         }
+                    } else {
+                        // Track has no cover art.
+                        self.apply_dynamic_accent(None);
                     }
                     self.playback.current_song = Some(song);
                 }
@@ -410,16 +492,21 @@ impl App {
                 self.playback.paused = false;
                 self.playback.elapsed = std::time::Duration::ZERO;
                 if let Some(song) = self.queue.current().cloned() {
-                    if self.kitty_supported {
-                        if let Some(cover_id) = &song.cover_art {
-                            let needs_fetch = self.art_cache
-                                .as_ref()
-                                .map(|(cached_id, _)| cached_id != cover_id)
-                                .unwrap_or(true);
-                            if needs_fetch {
-                                self.fetch_cover_art(cover_id.clone());
-                            }
+                    let cover_id = song.cover_art.clone();
+                    if let Some(ref cid) = cover_id {
+                        let needs_fetch = self.art_cache
+                            .as_ref()
+                            .map(|(cached_id, _)| cached_id != cid)
+                            .unwrap_or(true);
+                        if needs_fetch {
+                            self.apply_dynamic_accent(None);
+                            self.fetch_cover_art(cid.clone());
+                        } else if let Some((_, ref bytes)) = self.art_cache.clone() {
+                            let accent = extract_accent(bytes);
+                            self.apply_dynamic_accent(accent);
                         }
+                    } else {
+                        self.apply_dynamic_accent(None);
                     }
                     self.playback.current_song = Some(song);
                 }
@@ -559,6 +646,22 @@ impl App {
                 self.search_mode.query.clear();
                 self.search_mode.selected = 0;
                 self.search_filter = None;
+            }
+            Action::ToggleDynamicTheme => {
+                if self.theme.dynamic {
+                    // Disable: instant snap back to static accent.
+                    self.theme.dynamic = false;
+                    self.accent_current = self.theme.accent;
+                    self.accent_target  = self.theme.accent;
+                    self.accent_transition_start = None;
+                } else {
+                    // Enable: start transition from current to dynamic accent (if any).
+                    self.theme.dynamic = true;
+                    let target = self.dynamic_accent.unwrap_or(self.theme.accent);
+                    self.accent_lerp_from = self.accent_current;
+                    self.accent_target    = target;
+                    self.accent_transition_start = Some(Instant::now());
+                }
             }
             Action::None => {}
         }

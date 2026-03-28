@@ -1,5 +1,6 @@
 mod action;
 mod app;
+mod color;
 mod config;
 mod keybinds;
 mod persist;
@@ -98,6 +99,9 @@ async fn run_loop(
             app.handle_player_event(event);
         }
 
+        // Advance colour transition before drawing.
+        app.tick_accent_transition();
+
         terminal.draw(|f| ui::render(app, f))?;
 
         // ── Kitty album art (rendered after ratatui so it sits above text) ──────
@@ -151,8 +155,10 @@ async fn run_loop(
         }
         last_tab = app.active_tab;
 
-        // Poll for events (50 ms timeout keeps progress bar responsive).
-        if event::poll(Duration::from_millis(50))? {
+        // Poll for events. During colour transitions redraw at 33 ms for
+        // smooth animation; otherwise 50 ms keeps the progress bar responsive.
+        let poll_ms = if app.accent_transition_active() { 33 } else { 50 };
+        if event::poll(Duration::from_millis(poll_ms))? {
             match event::read()? {
                 Event::Key(key) => {
                     // Only process key-press events; ignore release/repeat to avoid
@@ -216,6 +222,8 @@ fn map_key(code: KeyCode, modifiers: KeyModifiers, active_tab: Tab, kb: &Keybind
     if code == KeyCode::Char(' ') { return Action::PlayPause; }
     // '=' is always a secondary alias for volume_up (easy to hit with +)
     if code == KeyCode::Char('=') { return Action::VolumeUp; }
+    // 't' toggles dynamic accent colour
+    if code == KeyCode::Char('t') && modifiers.is_empty() { return Action::ToggleDynamicTheme; }
     // Up/Down arrows are always secondary scroll aliases
     if code == KeyCode::Up   { return Action::Navigate(Direction::Up);   }
     if code == KeyCode::Down { return Action::Navigate(Direction::Down); }

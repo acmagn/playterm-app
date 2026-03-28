@@ -35,6 +35,8 @@ pub enum Action {
     SearchBackspace,
     SearchConfirm,
     SearchCancel,
+    /// Toggle dynamic accent colour extraction from album art.
+    ToggleDynamicTheme,
     Quit,
     None,
 }

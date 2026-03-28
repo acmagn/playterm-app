@@ -37,7 +37,7 @@ fn render_track_info(app: &App, frame: &mut Frame, area: Rect) {
                 Span::raw("  "),
                 Span::styled(
                     song.title.as_str(),
-                    Style::default().fg(t.accent).add_modifier(Modifier::BOLD),
+                    Style::default().fg(app.accent()).add_modifier(Modifier::BOLD),
                 ),
             ]),
             Line::from(vec![
@@ -95,9 +95,9 @@ fn render_controls(app: &App, frame: &mut Frame, area: Rect) {
     let (play_label, play_style) = if app.playback.current_song.is_none() {
         ("▶", Style::default().fg(t.dimmed))
     } else if app.playback.paused {
-        ("( ▶ )", Style::default().fg(t.accent).add_modifier(Modifier::BOLD))
+        ("( ▶ )", Style::default().fg(app.accent()).add_modifier(Modifier::BOLD))
     } else {
-        ("( ⏸ )", Style::default().fg(t.accent).add_modifier(Modifier::BOLD))
+        ("( ⏸ )", Style::default().fg(app.accent()).add_modifier(Modifier::BOLD))
     };
 
     let sep = Style::default().fg(t.dimmed);
@@ -155,14 +155,28 @@ fn render_progress(app: &App, frame: &mut Frame, area: Rect) {
     // Bar width: column width minus elapsed, total, and two 2-space gaps.
     let col_w = area.width as usize;
     let bar_w = col_w.saturating_sub(elapsed_str.len() + total_str.len() + 4);
-    let filled = ((ratio * bar_w as f64) as usize).min(bar_w);
-    let empty = bar_w - filled;
+
+    // Sub-character-cell bar using Unicode fractional blocks.
+    // Each cell = 8 units; FRAC[i] fills (i+1)/8 of a cell.
+    const FRAC: [char; 8] = ['▏', '▎', '▍', '▌', '▋', '▊', '▉', '█'];
+    let units       = ((ratio * bar_w as f64 * 8.0) as usize).min(bar_w * 8);
+    let full        = units / 8;
+    let frac        = units % 8;
+    let has_partial = frac > 0 && full < bar_w;
+    let empty       = bar_w - full - usize::from(has_partial);
+
+    let filled_str:  String = "█".repeat(full);
+    let partial_str: String = if has_partial { FRAC[frac - 1].to_string() } else { String::new() };
+    let empty_str:   String = "░".repeat(empty);
+
+    let accent_color = app.accent();
 
     let progress = Line::from(vec![
         Span::styled(elapsed_str, Style::default().fg(t.dimmed)),
         Span::raw("  "),
-        Span::styled("█".repeat(filled), Style::default().fg(t.accent)),
-        Span::styled("░".repeat(empty), Style::default().fg(t.dimmed)),
+        Span::styled(filled_str,  Style::default().fg(accent_color)),
+        Span::styled(partial_str, Style::default().fg(accent_color)),
+        Span::styled(empty_str,   Style::default().fg(t.dimmed)),
         Span::raw("  "),
         Span::styled(total_str, Style::default().fg(t.dimmed)),
     ]);

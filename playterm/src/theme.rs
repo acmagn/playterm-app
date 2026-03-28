@@ -22,6 +22,8 @@ pub struct Theme {
     pub border:        Color,
     /// Active pane borders. (#3a3a3a)
     pub border_active: Color,
+    /// Whether to use the dynamic accent extracted from album art.
+    pub dynamic:       bool,
 }
 
 impl Theme {
@@ -37,6 +39,18 @@ impl Theme {
             dimmed:        p(sec.dimmed.as_deref(),        Color::Rgb( 90,  88,  88)),
             border:        p(sec.border.as_deref(),        Color::Rgb( 37,  37,  37)),
             border_active: p(sec.border_active.as_deref(), Color::Rgb( 58,  58,  58)),
+            dynamic:       sec.dynamic.unwrap_or(true),
+        }
+    }
+
+    /// Return the accent colour to use for rendering: the dynamic extracted
+    /// colour when `self.dynamic` is true and one is provided, else the
+    /// static configured accent.
+    pub fn effective_accent(&self, dynamic_accent: Option<Color>) -> Color {
+        if self.dynamic {
+            dynamic_accent.unwrap_or(self.accent)
+        } else {
+            self.accent
         }
     }
 }

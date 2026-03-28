@@ -8,7 +8,7 @@ use crate::app::App;
 pub fn render(app: &App, frame: &mut Frame, area: Rect, is_active: bool) {
     let t = &app.theme;
     let border_color = if is_active { t.border_active } else { t.border };
-    let title_color  = if is_active { t.accent }        else { t.dimmed };
+    let title_color  = if is_active { app.accent() }    else { t.dimmed };
 
     let count = app.queue.songs.len();
     let title = if count == 0 {
@@ -53,7 +53,7 @@ pub fn render(app: &App, frame: &mut Frame, area: Rect, is_active: bool) {
         let label = format!("{}  {}  {}  {}", num, title_col, artist_col, dur);
 
         let style = if i == app.queue.cursor {
-            Style::default().fg(t.accent).add_modifier(Modifier::BOLD)
+            Style::default().fg(app.accent()).add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(t.foreground)
         };
@@ -62,7 +62,7 @@ pub fn render(app: &App, frame: &mut Frame, area: Rect, is_active: bool) {
 
     let list = List::new(items)
         .block(block)
-        .highlight_style(Style::default().fg(t.accent).add_modifier(Modifier::BOLD))
+        .highlight_style(Style::default().fg(app.accent()).add_modifier(Modifier::BOLD))
         .style(Style::default().bg(t.surface));
 
     let mut state = ListState::default().with_offset(app.queue.scroll);

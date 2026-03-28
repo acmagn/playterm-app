@@ -56,17 +56,17 @@ pub fn render(app: &App, frame: &mut Frame, area: Rect) {
 
     let line = if app.search_mode.active {
         Line::from(vec![
-            Span::styled("/ ", Style::default().fg(t.accent)),
+            Span::styled("/ ", Style::default().fg(app.accent())),
             Span::styled(app.search_mode.query.as_str(), Style::default().fg(t.foreground)),
-            Span::styled("_", Style::default().fg(t.accent)),
+            Span::styled("_", Style::default().fg(app.accent())),
             Span::raw("   "),
             Span::styled("Enter", Style::default().fg(t.dimmed)),
             Span::raw(" "),
-            Span::styled("Confirm", Style::default().fg(t.accent)),
+            Span::styled("Confirm", Style::default().fg(app.accent())),
             Span::styled("  │  ", Style::default().fg(t.dimmed)),
             Span::styled("Esc", Style::default().fg(t.dimmed)),
             Span::raw(" "),
-            Span::styled("Cancel", Style::default().fg(t.accent)),
+            Span::styled("Cancel", Style::default().fg(app.accent())),
         ])
     } else {
         let host = app.config.subsonic_url
@@ -88,17 +88,18 @@ pub fn render(app: &App, frame: &mut Frame, area: Rect) {
             (kb.next_track.display(),    "Next"),
             (kb.prev_track.display(),    "Prev"),
             (kb.quit.display(),          "Quit"),
+            ("t".to_string(),            "Dynamic"),
         ];
 
         let host_span_w = (2 + host.len()) as u16; // "● " + host
         let legend_w = area.width.saturating_sub(host_span_w);
 
         let key_style    = Style::default().fg(t.dimmed);
-        let action_style = Style::default().fg(t.accent);
+        let action_style = Style::default().fg(app.accent());
         let sep_style    = Style::default().fg(t.dimmed);
 
         let mut spans: Vec<Span> = vec![
-            Span::styled("● ", Style::default().fg(t.accent)),
+            Span::styled("● ", Style::default().fg(app.accent())),
             Span::styled(host.to_string(), Style::default().fg(t.dimmed)),
         ];
         spans.extend(build_legend(&binds, legend_w, key_style, action_style, sep_style));

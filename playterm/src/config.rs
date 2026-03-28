@@ -56,6 +56,9 @@ pub struct ThemeSection {
     pub dimmed:        Option<String>,
     pub border:        Option<String>,
     pub border_active: Option<String>,
+    /// Whether to extract and apply a dynamic accent colour from album art.
+    /// Default: true.
+    pub dynamic:       Option<bool>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -197,6 +200,7 @@ max_bit_rate = 0   # 0 = unlimited; set e.g. 320 to cap streaming bitrate
 # dimmed        = "#5a5858"   # muted / secondary text
 # border        = "#252525"   # inactive pane borders
 # border_active = "#3a3a3a"   # active pane borders
+# dynamic       = true         # extract accent colour from album art
 "##;
     std::fs::write(path, default_toml)
         .with_context(|| format!("writing default config to {}", path.display()))?;

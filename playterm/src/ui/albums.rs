@@ -10,7 +10,7 @@ use playterm_subsonic::Album;
 pub fn render(app: &App, frame: &mut Frame, area: Rect, is_active: bool) {
     let t = &app.theme;
     let border_color = if is_active { t.border_active } else { t.border };
-    let title_color  = if is_active { t.accent }        else { t.dimmed };
+    let title_color  = if is_active { app.accent() }    else { t.dimmed };
 
     let block = Block::default()
         .title(" Albums ")
@@ -39,7 +39,7 @@ pub fn render(app: &App, frame: &mut Frame, area: Rect, is_active: bool) {
             frame.render_widget(list, area);
         }
         Some(LoadingState::Error(e)) => {
-            let item = ListItem::new(format!("Error: {e}")).style(Style::default().fg(t.accent));
+            let item = ListItem::new(format!("Error: {e}")).style(Style::default().fg(app.accent()));
             let list = List::new(vec![item]).block(block);
             frame.render_widget(list, area);
         }
@@ -73,7 +73,7 @@ pub fn render(app: &App, frame: &mut Frame, area: Rect, is_active: bool) {
                 .block(block)
                 .highlight_style(
                     Style::default()
-                        .bg(t.accent)
+                        .bg(app.accent())
                         .fg(t.background)
                         .add_modifier(Modifier::BOLD),
                 )
