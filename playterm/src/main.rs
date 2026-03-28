@@ -233,7 +233,7 @@ fn map_key(code: KeyCode, modifiers: KeyModifiers, active_tab: Tab) -> Action {
         KeyCode::Char('D') => Action::ClearQueue,
         KeyCode::Char(' ') => Action::PlayPause,
         KeyCode::Char('x') => Action::Shuffle,
-        KeyCode::Char('Z') => Action::Unshuffle,
+        KeyCode::Char('z') => Action::Unshuffle,
         KeyCode::Char('/') => Action::SearchStart,
         _ => Action::None,
     }
