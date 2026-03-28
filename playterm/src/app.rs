@@ -328,6 +328,37 @@ impl App {
                 self.playback.elapsed = elapsed;
                 self.playback.total = total;
             }
+            PlayerEvent::AboutToFinish => {
+                // Pre-load the next track for gapless playback.
+                if let Some(next) = self.queue.peek_next().cloned() {
+                    let url = self.subsonic.stream_url(&next.id, self.config.max_bit_rate);
+                    let duration =
+                        next.duration.map(|s| std::time::Duration::from_secs(u64::from(s)));
+                    let _ = self
+                        .player_tx
+                        .send(PlayerCommand::EnqueueNext { url, duration });
+                }
+            }
+            PlayerEvent::TrackAdvanced => {
+                // The gapless transition happened — advance the queue cursor.
+                self.queue.next();
+                self.playback.paused = false;
+                self.playback.elapsed = std::time::Duration::ZERO;
+                if let Some(song) = self.queue.current().cloned() {
+                    if self.kitty_supported {
+                        if let Some(cover_id) = &song.cover_art {
+                            let needs_fetch = self.art_cache
+                                .as_ref()
+                                .map(|(cached_id, _)| cached_id != cover_id)
+                                .unwrap_or(true);
+                            if needs_fetch {
+                                self.fetch_cover_art(cover_id.clone());
+                            }
+                        }
+                    }
+                    self.playback.current_song = Some(song);
+                }
+            }
             PlayerEvent::TrackEnded => {
                 if self.queue.next() {
                     self.play_current();

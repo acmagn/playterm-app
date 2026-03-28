@@ -97,6 +97,11 @@ impl QueueState {
         }
     }
 
+    /// Peek at the next song without advancing the cursor.
+    pub fn peek_next(&self) -> Option<&Song> {
+        self.songs.get(self.cursor + 1)
+    }
+
     /// Move to the previous song. Returns true if there is a previous song.
     pub fn prev(&mut self) -> bool {
         if self.cursor > 0 {

@@ -23,6 +23,11 @@ pub enum PlayerCommand {
     /// Start playing the track at `url`. `duration` is the expected total
     /// duration (from Subsonic metadata), used for progress display.
     PlayUrl { url: String, duration: Option<Duration> },
+    /// Append the next track to the player queue for gapless playback.
+    ///
+    /// Must only be sent in response to `PlayerEvent::AboutToFinish`.
+    /// Does NOT stop current playback.
+    EnqueueNext { url: String, duration: Option<Duration> },
     Pause,
     Resume,
     Stop,
@@ -35,6 +40,11 @@ pub enum PlayerEvent {
     TrackStarted,
     /// Fired every ~500 ms. `total` is `None` when unknown.
     Progress { elapsed: Duration, total: Option<Duration> },
+    /// Fired ~5 s before the current track ends. The TUI should respond with
+    /// `PlayerCommand::EnqueueNext` to enable gapless playback.
+    AboutToFinish,
+    /// Fired when a gaplessly enqueued track begins playing (elapsed resets).
+    TrackAdvanced,
     TrackEnded,
     Error(String),
 }
@@ -73,15 +83,28 @@ fn player_thread(cmd_rx: mpsc::Receiver<PlayerCommand>, evt_tx: mpsc::Sender<Pla
     let mut current_total: Option<Duration> = None;
     // Tracks whether the previous tick saw a non-empty player (to detect natural end).
     let mut was_playing = false;
+    // Gapless state.
+    let mut next_total: Option<Duration> = None;
+    let mut next_queued = false;
+    let mut about_to_finish_sent = false;
+    let mut prev_elapsed = Duration::ZERO;
 
     loop {
         // ── Drain all pending commands (non-blocking) ─────────────────────────
         loop {
             use mpsc::TryRecvError;
             match cmd_rx.try_recv() {
-                Ok(cmd) => {
-                    handle_command(cmd, &player, &evt_tx, &mut current_total, &mut was_playing)
-                }
+                Ok(cmd) => handle_command(
+                    cmd,
+                    &player,
+                    &evt_tx,
+                    &mut current_total,
+                    &mut was_playing,
+                    &mut next_total,
+                    &mut next_queued,
+                    &mut about_to_finish_sent,
+                    &mut prev_elapsed,
+                ),
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => return,
             }
@@ -90,17 +113,47 @@ fn player_thread(cmd_rx: mpsc::Receiver<PlayerCommand>, evt_tx: mpsc::Sender<Pla
         // ── Progress tick ─────────────────────────────────────────────────────
         if !player.is_paused() && !player.empty() {
             let elapsed = player.get_pos();
+
+            // Detect gapless track transition: elapsed resets to near zero
+            // while we know a next track was appended.
+            if next_queued
+                && prev_elapsed > Duration::from_secs(1)
+                && elapsed < Duration::from_millis(500)
+            {
+                current_total = next_total.take();
+                next_queued = false;
+                about_to_finish_sent = false;
+                let _ = evt_tx.send(PlayerEvent::TrackAdvanced);
+            }
+            prev_elapsed = elapsed;
+
             let _ = evt_tx.send(PlayerEvent::Progress {
                 elapsed,
                 total: current_total,
             });
+
+            // Send AboutToFinish ~5 s before the end so the TUI can enqueue next.
+            if !about_to_finish_sent && !next_queued {
+                if let Some(total) = current_total {
+                    let remaining = total.saturating_sub(elapsed);
+                    if remaining <= Duration::from_secs(5) && remaining > Duration::ZERO {
+                        about_to_finish_sent = true;
+                        let _ = evt_tx.send(PlayerEvent::AboutToFinish);
+                    }
+                }
+            }
+
             was_playing = true;
         }
 
-        // ── Natural track end detection ───────────────────────────────────────
+        // ── Natural track end detection (no next track was enqueued) ──────────
         if was_playing && player.empty() {
             was_playing = false;
             current_total = None;
+            next_total = None;
+            next_queued = false;
+            about_to_finish_sent = false;
+            prev_elapsed = Duration::ZERO;
             let _ = evt_tx.send(PlayerEvent::TrackEnded);
         }
 
@@ -114,11 +167,19 @@ fn handle_command(
     evt_tx: &mpsc::Sender<PlayerEvent>,
     current_total: &mut Option<Duration>,
     was_playing: &mut bool,
+    next_total: &mut Option<Duration>,
+    next_queued: &mut bool,
+    about_to_finish_sent: &mut bool,
+    prev_elapsed: &mut Duration,
 ) {
     match cmd {
         PlayerCommand::PlayUrl { url, duration } => {
             player.stop();
             *was_playing = false;
+            *next_total = None;
+            *next_queued = false;
+            *about_to_finish_sent = false;
+            *prev_elapsed = Duration::ZERO;
 
             match download_and_decode(&url) {
                 Ok(source) => {
@@ -132,11 +193,27 @@ fn handle_command(
                 }
             }
         }
+        PlayerCommand::EnqueueNext { url, duration } => {
+            match download_and_decode(&url) {
+                Ok(source) => {
+                    *next_total = duration;
+                    *next_queued = true;
+                    player.append(source);
+                }
+                Err(e) => {
+                    let _ = evt_tx.send(PlayerEvent::Error(format!("enqueue error: {e}")));
+                }
+            }
+        }
         PlayerCommand::Pause => player.pause(),
         PlayerCommand::Resume => player.play(),
         PlayerCommand::Stop => {
             player.stop();
             *current_total = None;
+            *next_total = None;
+            *next_queued = false;
+            *about_to_finish_sent = false;
+            *prev_elapsed = Duration::ZERO;
             *was_playing = false;
         }
         PlayerCommand::SetVolume(v) => player.set_volume(v),
