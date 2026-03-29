@@ -30,10 +30,20 @@ pub fn render_visualizer(f: &mut Frame, area: Rect, bands: &[f32], accent: Color
     // regions that spike independently and look like noise.  Rendering 30 of
     // the 32 computed bands cuts the noisy tail without touching the FFT logic.
     let visible_bands = bands.len().saturating_sub(2);
+
+    // area.width is the inner pane width after block-border removal.
+    // Layout path: center → 50% right col → 25% bottom row → block inner.
+    // Examples: 80-col terminal → area.width ≈ 38; 140-col → area.width ≈ 68.
+    // At 2 cols per bar (1 bar + 1 gap): area.width / 2 is the natural count.
     let num_bars = ((area.width / 2) as usize)
         .min(30)
-        .max(8)
+        .max(28)  // always attempt at least 28 bars
         .min(visible_bands);
+
+    // Floating-point step distributes all num_bars evenly across area.width.
+    // When num_bars > area.width / 2 (narrow terminal), bars pack tighter than
+    // 2 cols but still span the full width without the break-guard cutting them.
+    let bar_step_f = area.width as f32 / num_bars as f32;
 
     for i in 0..num_bars {
         // Map bar index to the corresponding visible band (first 30 of 32).
@@ -45,7 +55,7 @@ pub fn render_visualizer(f: &mut Frame, area: Rect, bands: &[f32], accent: Color
         let full_rows = (total_units / 8).min(area.height as usize);
         let partial_idx = total_units % 8;
 
-        let col_x = area.x + (i * 2) as u16;
+        let col_x = area.x + (i as f32 * bar_step_f) as u16;
         if col_x >= area.x + area.width {
             break;
         }
