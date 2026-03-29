@@ -324,8 +324,13 @@ pub fn render_art_strip(
     let (thumb_cols, thumb_rows) = art_strip_thumbnail_size(cell_px, strip_area.height);
     let visible_count = visible_thumbnail_count(strip_area.width, thumb_cols, 1);
     let (cell_w, cell_h) = cell_px.unwrap_or((8, 16));
-    let px_w = thumb_cols as u32 * cell_w as u32;
-    let px_h = thumb_rows as u32 * cell_h as u32;
+    // Force square pixel dimensions: use thumb_rows * effective_cell_h for both axes.
+    // This prevents portrait-squished thumbnails on terminals (e.g. Ghostty macOS)
+    // where cell_w < cell_h — album art is always 1:1 so square pixels are correct.
+    let effective_cell_h = cell_h.max(cell_w);
+    let thumb_px = thumb_rows as u32 * effective_cell_h as u32;
+    let px_w = thumb_px;
+    let px_h = thumb_px;
 
     for i in 0..visible_count {
         let album_index = scroll_offset + i;

@@ -249,6 +249,10 @@ pub struct App {
     // ── Help popup (Feature 5.2.1) ────────────────────────────────────────────
     /// Whether the keybind reference popup is open.
     pub help_visible: bool,
+    /// Set to `true` when the `i` popup is closed while on the Home tab so the
+    /// art strip can be re-rendered on the next frame (same pattern as tab-switch
+    /// art restoration).
+    pub home_art_needs_redraw: bool,
 
     // ── Lyrics (Feature 5.2) ──────────────────────────────────────────────────
     /// Whether the lyrics overlay is currently visible (NowPlaying tab only).
@@ -329,6 +333,7 @@ impl App {
             cache: track_cache,
             prefetch_gen: Arc::new(AtomicU64::new(0)),
             help_visible: false,
+            home_art_needs_redraw: false,
             home: HomeState::default(),
             pending_artist_select: None,
             history: crate::history::PlayHistory::default(),
@@ -982,7 +987,20 @@ impl App {
 
     pub fn dispatch(&mut self, action: Action) {
         match action {
-            Action::ToggleHelp => self.help_visible = !self.help_visible,
+            Action::ToggleHelp => {
+                let was_visible = self.help_visible;
+                self.help_visible = !self.help_visible;
+                if self.kitty_supported && self.active_tab == Tab::Home {
+                    if !was_visible {
+                        // Opening popup on Home tab — clear art strip so it doesn't
+                        // bleed through the popup overlay.
+                        let _ = crate::ui::kitty_art::clear_art_strip();
+                    } else {
+                        // Closing popup on Home tab — request art strip redraw on next frame.
+                        self.home_art_needs_redraw = true;
+                    }
+                }
+            }
             Action::Quit => self.should_quit = true,
             Action::SwitchTab => {
                 if self.kitty_supported {
@@ -1194,30 +1212,38 @@ impl App {
                 }
             }
             Action::HomeAlbumLeft => {
-                if self.active_tab == Tab::Home
-                    && self.home.active_section == HomeSection::RecentAlbums
-                {
-                    if self.home.album_selected_index > 0 {
-                        self.home.album_selected_index -= 1;
-                        if self.home.album_selected_index < self.home.album_scroll_offset {
-                            self.home.album_scroll_offset = self.home.album_selected_index;
+                if self.active_tab == Tab::Home {
+                    if self.home.active_section == HomeSection::RecentAlbums {
+                        if self.home.album_selected_index > 0 {
+                            self.home.album_selected_index -= 1;
+                            if self.home.album_selected_index < self.home.album_scroll_offset {
+                                self.home.album_scroll_offset = self.home.album_selected_index;
+                            }
                         }
+                    } else {
+                        // In bottom panes: h escapes to previous section.
+                        self.home.active_section = self.home.active_section.prev();
+                        self.home.selected_index = 0;
                     }
                 }
             }
             Action::HomeAlbumRight => {
-                if self.active_tab == Tab::Home
-                    && self.home.active_section == HomeSection::RecentAlbums
-                {
-                    let max_idx = self.home.recent_albums.len().saturating_sub(1);
-                    if self.home.album_selected_index < max_idx {
-                        self.home.album_selected_index += 1;
-                        // visible_count: approximate from cell_px; assume 5 if unknown
-                        let visible_count = compute_visible_count(self.cell_px, 5);
-                        let scroll_end = self.home.album_scroll_offset + visible_count.saturating_sub(1);
-                        if self.home.album_selected_index > scroll_end {
-                            self.home.album_scroll_offset += 1;
+                if self.active_tab == Tab::Home {
+                    if self.home.active_section == HomeSection::RecentAlbums {
+                        let max_idx = self.home.recent_albums.len().saturating_sub(1);
+                        if self.home.album_selected_index < max_idx {
+                            self.home.album_selected_index += 1;
+                            // visible_count: approximate from cell_px; assume 5 if unknown
+                            let visible_count = compute_visible_count(self.cell_px, 5);
+                            let scroll_end = self.home.album_scroll_offset + visible_count.saturating_sub(1);
+                            if self.home.album_selected_index > scroll_end {
+                                self.home.album_scroll_offset += 1;
+                            }
                         }
+                    } else {
+                        // In bottom panes: l escapes to next section.
+                        self.home.active_section = self.home.active_section.next();
+                        self.home.selected_index = 0;
                     }
                 }
             }

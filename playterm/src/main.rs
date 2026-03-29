@@ -175,6 +175,41 @@ async fn run_loop(
                     art_displayed = false;
                 }
             }
+
+            // ── Home tab art strip redraw after popup close ───────────────────
+            // When the `i` popup was closed on the Home tab, re-render the art
+            // strip (it was cleared on popup-open to avoid overlapping the popup).
+            if app.home_art_needs_redraw
+                && app.active_tab == app::Tab::Home
+                && !app.help_visible
+            {
+                let sz = terminal.size()?;
+                let area = Rect::new(0, 0, sz.width, sz.height);
+                // Replicate the strip area used in home_tab.rs render.
+                let content_area = ui::layout::build_layout(area).center;
+                let half = (content_area.height / 2).max(3);
+                let top_area = Rect { height: half, ..content_area };
+                // albums_inner = top_area inset by 1 on each side (block border).
+                let albums_inner = Rect {
+                    x: top_area.x + 1,
+                    y: top_area.y + 1,
+                    width: top_area.width.saturating_sub(2),
+                    height: top_area.height.saturating_sub(2),
+                };
+                let thumb_area_h = albums_inner.height.saturating_sub(2).max(1);
+                let strip_rect = Rect { height: thumb_area_h, ..albums_inner };
+                ui::kitty_art::render_art_strip(
+                    &app.home.recent_albums,
+                    app.home.album_scroll_offset,
+                    app.home.album_selected_index,
+                    &app.home_art_cache,
+                    strip_rect,
+                    app.cell_px,
+                    albums_inner.x,
+                    albums_inner.y,
+                );
+                app.home_art_needs_redraw = false;
+            }
         }
         last_tab = app.active_tab;
 
