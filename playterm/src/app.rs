@@ -131,7 +131,7 @@ impl HomeSection {
     pub fn next(self) -> Self {
         match self {
             HomeSection::RecentAlbums => HomeSection::RecentTracks,
-            HomeSection::RecentTracks => HomeSection::TopArtists,
+            HomeSection::RecentTracks => HomeSection::Rediscover,
             HomeSection::TopArtists  => HomeSection::Rediscover,
             HomeSection::Rediscover  => HomeSection::Rediscover,
         }
@@ -141,8 +141,8 @@ impl HomeSection {
         match self {
             HomeSection::RecentAlbums => HomeSection::RecentAlbums,
             HomeSection::RecentTracks => HomeSection::RecentAlbums,
-            HomeSection::TopArtists  => HomeSection::RecentTracks,
-            HomeSection::Rediscover  => HomeSection::TopArtists,
+            HomeSection::TopArtists  => HomeSection::RecentAlbums,
+            HomeSection::Rediscover  => HomeSection::RecentTracks,
         }
     }
 }
@@ -426,11 +426,22 @@ impl App {
         self.home.active_section = HomeSection::RecentAlbums;
 
         // Kick off art fetches for any album not yet cached.
+        // Limit to 3 concurrent in-flight fetches to avoid overwhelming the connection.
+        self.spawn_pending_home_art_fetches();
+    }
+
+    /// Spawn home art fetch tasks for albums not yet cached or loading,
+    /// up to a maximum of 3 concurrent in-flight fetches.
+    fn spawn_pending_home_art_fetches(&mut self) {
+        const MAX_CONCURRENT: usize = 3;
         let album_ids: Vec<String> = self.home.recent_albums
             .iter()
             .map(|a| a.album_id.clone())
             .collect();
         for album_id in album_ids {
+            if self.home_art_loading.len() >= MAX_CONCURRENT {
+                break;
+            }
             if self.home_art_cache.contains_key(&album_id) {
                 continue;
             }
@@ -732,7 +743,8 @@ impl App {
             LibraryUpdate::HomeArt { album_id, bytes } => {
                 self.home_art_loading.remove(&album_id);
                 self.home_art_cache.insert(album_id, bytes);
-                // No forced re-render — next natural tick will pick it up.
+                // A fetch slot opened up — check if more albums need fetching.
+                self.spawn_pending_home_art_fetches();
             }
         }
     }
@@ -1311,7 +1323,7 @@ impl App {
             HomeSection::RecentAlbums => 0,
             HomeSection::RecentTracks => self.home.recent_tracks.len(),
             HomeSection::TopArtists  => self.home.top_artists.len(),
-            HomeSection::Rediscover  => 0, // no per-item nav in Rediscover this push
+            HomeSection::Rediscover  => self.home.rediscover.len(),
         };
         if section_len == 0 { return; }
         self.home.selected_index = match dir {
@@ -1520,15 +1532,19 @@ impl App {
             }
             HomeSection::TopArtists => {
                 // Switch to Browser tab.
-                // TODO: no pre-selection mechanism exists yet — switch tab only.
-                if self.kitty_supported { let _ = crate::ui::kitty_art::clear_image(); }
+                if self.kitty_supported {
+                    let _ = crate::ui::kitty_art::clear_image();
+                    let _ = crate::ui::kitty_art::clear_art_strip();
+                }
                 self.active_tab = Tab::Browser;
                 self.search_filter = None;
             }
             HomeSection::Rediscover => {
                 // Switch to Browser tab.
-                // TODO: no pre-selection mechanism exists yet — switch tab only.
-                if self.kitty_supported { let _ = crate::ui::kitty_art::clear_image(); }
+                if self.kitty_supported {
+                    let _ = crate::ui::kitty_art::clear_image();
+                    let _ = crate::ui::kitty_art::clear_art_strip();
+                }
                 self.active_tab = Tab::Browser;
                 self.search_filter = None;
             }

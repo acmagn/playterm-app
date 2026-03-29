@@ -244,6 +244,127 @@ async fn run_loop(
     Ok(())
 }
 
+/// Handle mouse clicks within the Home tab center area.
+fn handle_home_click(x: u16, y: u16, app: &mut App, center: ratatui::layout::Rect) {
+    use ratatui::layout::{Constraint, Layout};
+    use crate::ui::kitty_art::art_strip_thumbnail_size;
+
+    if y < center.y || y >= center.y + center.height {
+        return;
+    }
+
+    // Replicate the home_tab layout: top 50% = recently played, bottom 50% = tracks+rediscover.
+    let half = (center.height / 2).max(3);
+    let bottom_h = center.height.saturating_sub(half);
+
+    let top_area = ratatui::layout::Rect {
+        x: center.x,
+        y: center.y,
+        width: center.width,
+        height: half,
+    };
+    let bottom_area = ratatui::layout::Rect {
+        x: center.x,
+        y: center.y + half,
+        width: center.width,
+        height: bottom_h,
+    };
+
+    // ── Top block: Recently Played ────────────────────────────────────────────
+    if y >= top_area.y && y < top_area.y + top_area.height {
+        // Inner area (subtract 1-cell border on all sides).
+        let inner = ratatui::layout::Rect {
+            x: top_area.x + 1,
+            y: top_area.y + 1,
+            width: top_area.width.saturating_sub(2),
+            height: top_area.height.saturating_sub(2),
+        };
+        if y >= inner.y && y < inner.y + inner.height && x >= inner.x && x < inner.x + inner.width {
+            // Focus the RecentAlbums section.
+            app.home.active_section = app::HomeSection::RecentAlbums;
+            app.home.selected_index = 0;
+
+            // Compute which thumbnail was clicked.
+            let thumb_area_h = inner.height.saturating_sub(2).max(1);
+            let (thumb_cols, _) = art_strip_thumbnail_size(app.cell_px, thumb_area_h);
+            let gap = 1u16;
+            let rel_x = x.saturating_sub(inner.x);
+            let slot = (rel_x / (thumb_cols + gap)) as usize;
+            let album_index = app.home.album_scroll_offset + slot;
+            if album_index < app.home.recent_albums.len() {
+                if app.home.album_selected_index == album_index {
+                    // Second click on already-selected album: navigate to Browser.
+                    if app.kitty_supported {
+                        let _ = crate::ui::kitty_art::clear_image();
+                        let _ = crate::ui::kitty_art::clear_art_strip();
+                    }
+                    app.active_tab = app::Tab::Browser;
+                    app.search_filter = None;
+                } else {
+                    // First click: just select.
+                    app.home.album_selected_index = album_index;
+                }
+            }
+        }
+        return;
+    }
+
+    // ── Bottom blocks ─────────────────────────────────────────────────────────
+    if bottom_h == 0 || y < bottom_area.y || y >= bottom_area.y + bottom_area.height {
+        return;
+    }
+
+    let bottom_cols = Layout::horizontal([
+        Constraint::Percentage(50),
+        Constraint::Percentage(50),
+    ])
+    .split(bottom_area);
+
+    let tracks_area    = bottom_cols[0];
+    let rediscover_area = bottom_cols[1];
+
+    // Recent Tracks block.
+    if x >= tracks_area.x && x < tracks_area.x + tracks_area.width {
+        let inner_y = tracks_area.y + 1;
+        let inner_h = tracks_area.height.saturating_sub(2);
+        if y >= inner_y && y < inner_y + inner_h {
+            let row = (y - inner_y) as usize;
+            if row < app.home.recent_tracks.len() {
+                if app.home.active_section == app::HomeSection::RecentTracks
+                    && app.home.selected_index == row
+                {
+                    // Second click on already-selected row: play it.
+                    app.dispatch(Action::Select);
+                } else {
+                    app.home.active_section = app::HomeSection::RecentTracks;
+                    app.home.selected_index = row;
+                }
+            }
+        }
+        return;
+    }
+
+    // Rediscover block.
+    if x >= rediscover_area.x && x < rediscover_area.x + rediscover_area.width {
+        let inner_y = rediscover_area.y + 1;
+        let inner_h = rediscover_area.height.saturating_sub(2);
+        if y >= inner_y && y < inner_y + inner_h {
+            let row = (y - inner_y) as usize;
+            if row < app.home.rediscover.len() {
+                if app.home.active_section == app::HomeSection::Rediscover
+                    && app.home.selected_index == row
+                {
+                    // Second click: navigate to Browser.
+                    app.dispatch(Action::Select);
+                } else {
+                    app.home.active_section = app::HomeSection::Rediscover;
+                    app.home.selected_index = row;
+                }
+            }
+        }
+    }
+}
+
 fn map_key(code: KeyCode, modifiers: KeyModifiers, active_tab: Tab, kb: &Keybinds) -> Action {
     // ── Home-tab-specific keys ────────────────────────────────────────────────
     if active_tab == Tab::Home {
@@ -363,8 +484,7 @@ fn handle_mouse_click(x: u16, y: u16, app: &mut App, terminal_size: ratatui::lay
             (areas.center, areas.now_playing)
         }
         Tab::Home => {
-            // Home tab has no interactive content yet — ignore all clicks.
-            let areas = ui::layout::build_nowplaying(terminal_size);
+            let areas = ui::layout::build_layout(terminal_size);
             (areas.center, areas.now_playing)
         }
     };
@@ -430,7 +550,7 @@ fn handle_mouse_click(x: u16, y: u16, app: &mut App, terminal_size: ratatui::lay
 
     match app.active_tab {
         Tab::Home => {
-            // Home tab has no interactive content yet.
+            handle_home_click(x, y, app, center);
         }
         Tab::Browser => {
             // 3 columns: [30% artists | 35% albums | 35% tracks]

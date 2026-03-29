@@ -4,7 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::Paragraph;
+use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
 use ratatui::Frame;
 
 use crate::app::{HomeSection, HomeState, RecentAlbum};
@@ -29,20 +29,18 @@ fn relative_time(played_at: i64) -> String {
     }
 }
 
-// ── Section header line ───────────────────────────────────────────────────────
+// ── Block with optional accent-coloured title ─────────────────────────────────
 
-fn section_header<'a>(label: &'a str, is_active: bool, accent: Color) -> Line<'a> {
-    if is_active {
-        Line::from(Span::styled(
-            format!(" \u{25B6} {}", label),
-            Style::default().fg(accent).add_modifier(Modifier::BOLD),
-        ))
+fn titled_block<'a>(title: &'a str, is_active: bool, accent: Color) -> Block<'a> {
+    let title_style = if is_active {
+        Style::default().fg(accent).add_modifier(Modifier::BOLD)
     } else {
-        Line::from(Span::styled(
-            format!("   {}", label),
-            Style::default().add_modifier(Modifier::BOLD),
-        ))
-    }
+        Style::default()
+    };
+    Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Plain)
+        .title(Span::styled(title, title_style))
 }
 
 // ── Top-level render ──────────────────────────────────────────────────────────
@@ -57,93 +55,165 @@ pub fn render_home_tab(
     home_art_cache: &HashMap<String, Vec<u8>>,
     cell_px: Option<(u16, u16)>,
 ) {
-    let total_rows = area.height;
+    if area.height == 0 {
+        return;
+    }
 
-    // Row 1: 8-row art strip.
-    // Row 2: remaining space, split into sections.
-    let art_height = 8u16;
-    let art_h = art_height.min(total_rows);
-    let content_h = total_rows.saturating_sub(art_h);
+    // Split content area: top 50% = Recently Played, bottom 50% = two side-by-side blocks.
+    let half = (area.height / 2).max(3);
+    let bottom_h = area.height.saturating_sub(half);
 
     let top_level = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(art_h),
-            Constraint::Length(content_h),
+            Constraint::Length(half),
+            Constraint::Length(bottom_h),
         ])
         .split(area);
 
-    let art_area     = top_level[0];
-    let content_area = top_level[1];
+    let top_area    = top_level[0];
+    let bottom_area = top_level[1];
 
-    // ── Art strip ─────────────────────────────────────────────────────────────
+    // ── Top: Recently Played block ────────────────────────────────────────────
     let is_albums_active = home.active_section == HomeSection::RecentAlbums;
+    let albums_block = titled_block(" Recently Played ", is_albums_active, accent);
+    let albums_inner = albums_block.inner(top_area);
+    f.render_widget(albums_block, top_area);
+
     if kitty_supported {
+        // Render art strip inside the inner area.
+        // thumb height = inner_area height minus 2 rows (album name + artist name).
+        let thumb_area_h = albums_inner.height.saturating_sub(2).max(1);
         crate::ui::kitty_art::render_art_strip(
             &home.recent_albums,
             home.album_scroll_offset,
             home.album_selected_index,
             home_art_cache,
-            art_area,
+            // Pass a rect of thumb_area_h height so the sizing helper uses it correctly.
+            Rect {
+                height: thumb_area_h,
+                ..albums_inner
+            },
             cell_px,
-            art_area.x,
-            art_area.y,
+            albums_inner.x,
+            albums_inner.y,
         );
-        // Draw selection indicator (a bracket line below the selected thumbnail)
-        // using ratatui so it stays within the layout system.
-        render_art_strip_selection_hint(f, art_area, home, accent, cell_px, is_albums_active);
+        // Render album/artist name rows below the thumbnails.
+        render_art_strip_labels(f, albums_inner, home, accent, cell_px, is_albums_active);
     } else {
-        render_art_strip_text_fallback(f, art_area, &home.recent_albums, home.album_selected_index, accent, is_albums_active);
+        render_art_strip_text_fallback(
+            f,
+            albums_inner,
+            &home.recent_albums,
+            home.album_selected_index,
+            accent,
+            is_albums_active,
+        );
     }
 
-    // ── Content sections ──────────────────────────────────────────────────────
-    // Heights: RecentTracks=7, TopArtists=7, Rediscover=4
-    // If terminal is short (< 30 rows total), collapse gracefully.
-    let (recent_h, top_h, rediscover_h): (u16, u16, u16) = if total_rows < 30 {
-        if content_h >= 11 {
-            (5, 5, 0) // hide Rediscover, reduce each by 2
-        } else {
-            let half = content_h / 2;
-            (half, content_h.saturating_sub(half), 0)
-        }
-    } else {
-        (7, 7, 4)
-    };
-
-    if content_h == 0 {
+    // ── Bottom: two side-by-side blocks ──────────────────────────────────────
+    if bottom_h == 0 {
         return;
     }
 
-    // Build constraints dynamically to avoid zero-height chunks.
-    let mut constraints = Vec::new();
-    if recent_h > 0    { constraints.push(Constraint::Length(recent_h)); }
-    if top_h > 0       { constraints.push(Constraint::Length(top_h)); }
-    if rediscover_h > 0 { constraints.push(Constraint::Length(rediscover_h)); }
-    // Fill any leftover space.
-    constraints.push(Constraint::Min(0));
+    let bottom_cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage(50),
+            Constraint::Percentage(50),
+        ])
+        .split(bottom_area);
 
-    let sections = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints(constraints)
-        .split(content_area);
+    let tracks_area   = bottom_cols[0];
+    let rediscover_area = bottom_cols[1];
 
-    let mut sec_idx = 0usize;
+    render_recent_tracks_block(f, tracks_area, home, accent);
+    render_rediscover_block(f, rediscover_area, home, accent);
+}
 
-    // ── Recent Tracks ─────────────────────────────────────────────────────────
-    if recent_h > 0 {
-        render_recent_tracks(f, sections[sec_idx], home, accent);
-        sec_idx += 1;
+// ── Art strip label rows (Kitty path) ─────────────────────────────────────────
+
+/// Render album name + artist name text rows below the Kitty thumbnails,
+/// inside the inner area of the Recently Played block.
+fn render_art_strip_labels(
+    f: &mut Frame,
+    inner: Rect,
+    home: &HomeState,
+    accent: Color,
+    cell_px: Option<(u16, u16)>,
+    is_active: bool,
+) {
+    if inner.height < 3 {
+        return;
     }
 
-    // ── Top Artists ───────────────────────────────────────────────────────────
-    if top_h > 0 {
-        render_top_artists(f, sections[sec_idx], home, accent);
-        sec_idx += 1;
+    let thumb_area_h = inner.height.saturating_sub(2).max(1);
+    let (thumb_cols, _) = art_strip_thumbnail_size(cell_px, thumb_area_h);
+    let visible_count = visible_thumbnail_count(inner.width, thumb_cols, 1);
+
+    // Album name row: 1 row below the thumbnail strip.
+    let name_row_y = inner.y + thumb_area_h;
+    // Artist name row: 1 row below the album name row.
+    let artist_row_y = name_row_y + 1;
+
+    if name_row_y >= inner.y + inner.height {
+        return;
     }
 
-    // ── Rediscover ────────────────────────────────────────────────────────────
-    if rediscover_h > 0 {
-        render_rediscover(f, sections[sec_idx], home, accent);
+    let mut name_spans: Vec<Span> = Vec::new();
+    let mut artist_spans: Vec<Span> = Vec::new();
+
+    for i in 0..visible_count {
+        let album_index = home.album_scroll_offset + i;
+        if album_index >= home.recent_albums.len() {
+            break;
+        }
+        let album = &home.recent_albums[album_index];
+        let is_selected = is_active && album_index == home.album_selected_index;
+
+        // Each label cell is `thumb_cols` wide (+ 1 gap, except last).
+        let label_width = thumb_cols as usize;
+        let name_label  = pad_or_truncate(&album.album_name, label_width);
+        let artist_label = pad_or_truncate(&album.artist_name, label_width);
+
+        let (name_style, artist_style) = if is_selected {
+            (
+                Style::default().fg(accent).add_modifier(Modifier::BOLD),
+                Style::default().fg(accent),
+            )
+        } else {
+            (
+                Style::default().fg(Color::Gray),
+                Style::default().fg(Color::DarkGray),
+            )
+        };
+
+        name_spans.push(Span::styled(name_label, name_style));
+        name_spans.push(Span::raw(" ")); // gap
+        artist_spans.push(Span::styled(artist_label, artist_style));
+        artist_spans.push(Span::raw(" ")); // gap
+    }
+
+    f.render_widget(
+        Paragraph::new(Line::from(name_spans)),
+        Rect {
+            x: inner.x,
+            y: name_row_y,
+            width: inner.width,
+            height: 1,
+        },
+    );
+
+    if artist_row_y < inner.y + inner.height {
+        f.render_widget(
+            Paragraph::new(Line::from(artist_spans)),
+            Rect {
+                x: inner.x,
+                y: artist_row_y,
+                width: inner.width,
+                height: 1,
+            },
+        );
     }
 }
 
@@ -163,13 +233,6 @@ pub fn render_art_strip_text_fallback(
         return;
     }
 
-    // Section header on row 0.
-    let header = section_header("Recently Played Albums", is_active, accent);
-    f.render_widget(
-        Paragraph::new(header),
-        Rect { height: 1, ..area },
-    );
-
     if albums.is_empty() {
         let hint = Line::from(Span::styled(
             "  No album history yet",
@@ -177,13 +240,12 @@ pub fn render_art_strip_text_fallback(
         ));
         f.render_widget(
             Paragraph::new(hint),
-            Rect { y: area.y + 1, height: 1, ..area },
+            Rect { height: 1, ..area },
         );
         return;
     }
 
-    // Row 1: horizontal album list — each album name truncated to fit.
-    // Available width split roughly evenly across visible albums.
+    // Row 0: horizontal album list — each album name truncated to fit.
     let visible = (area.width as usize / 16).max(1);
     let mut spans: Vec<Span> = Vec::new();
     for (i, album) in albums.iter().enumerate().take(visible) {
@@ -196,26 +258,24 @@ pub fn render_art_strip_text_fallback(
         };
         spans.push(Span::styled(label, style));
     }
-    if area.height > 1 {
-        f.render_widget(
-            Paragraph::new(Line::from(spans)),
-            Rect { y: area.y + 1, height: 1, ..area },
-        );
-    }
+    f.render_widget(
+        Paragraph::new(Line::from(spans)),
+        Rect { height: 1, ..area },
+    );
 
-    // Remaining rows: show selected album info.
-    if area.height > 2 {
+    // Row 1: show selected album info.
+    if area.height > 1 {
         if let Some(album) = albums.get(selected_index) {
             let info = format!("  {} — {}", album.album_name, album.artist_name);
             f.render_widget(
                 Paragraph::new(Line::from(Span::raw(info))),
-                Rect { y: area.y + 2, height: 1, ..area },
+                Rect { y: area.y + 1, height: 1, ..area },
             );
         }
     }
 
-    // Key hint on last row.
-    if area.height > 3 && is_active {
+    // Remaining rows: key hint.
+    if area.height > 2 && is_active {
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 "  h/l navigate  Enter play  a add to queue",
@@ -226,79 +286,40 @@ pub fn render_art_strip_text_fallback(
     }
 }
 
-/// Draw a thin selection indicator row beneath the Kitty art strip.
-/// Just shows the selected album name + artist in the bottom row of the strip area.
-fn render_art_strip_selection_hint(
-    f: &mut Frame,
-    area: Rect,
-    home: &HomeState,
-    accent: Color,
-    cell_px: Option<(u16, u16)>,
-    is_active: bool,
-) {
-    if area.height == 0 {
+// ── Section block renderers ───────────────────────────────────────────────────
+
+fn render_recent_tracks_block(f: &mut Frame, area: Rect, home: &HomeState, accent: Color) {
+    let is_active = home.active_section == HomeSection::RecentTracks;
+    let block = titled_block(" Recent Tracks ", is_active, accent);
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    if inner.height == 0 {
         return;
     }
 
-    // Show the selected album name at the bottom row of the strip area.
-    let (thumb_cols, _) = art_strip_thumbnail_size(cell_px, area.height.saturating_sub(1).max(1));
-    let visible_count = visible_thumbnail_count(area.width, thumb_cols, 1);
-
-    // Section header on the last row of the art strip area.
-    let header_y = area.y + area.height.saturating_sub(1);
-
-    if let Some(album) = home.recent_albums.get(home.album_selected_index) {
-        let info = format!(
-            "  {} — {}  [{}/{}]",
-            truncate(&album.album_name, 25),
-            truncate(&album.artist_name, 20),
-            home.album_selected_index + 1,
-            home.recent_albums.len(),
-        );
-        let style = if is_active {
-            Style::default().fg(accent)
-        } else {
-            Style::default().fg(Color::DarkGray)
-        };
-        f.render_widget(
-            Paragraph::new(Line::from(Span::styled(info, style))),
-            Rect { y: header_y, height: 1, ..area },
-        );
-    } else {
-        let header = section_header("Recently Played Albums", is_active, accent);
-        f.render_widget(
-            Paragraph::new(header),
-            Rect { y: header_y, height: 1, ..area },
-        );
-    }
-
-    // Scroll arrows if there are more albums than visible.
-    let _ = visible_count; // used for future scroll-indicator logic
-}
-
-// ── Section renderers ─────────────────────────────────────────────────────────
-
-fn render_recent_tracks(f: &mut Frame, area: Rect, home: &HomeState, accent: Color) {
-    let is_active = home.active_section == HomeSection::RecentTracks;
     let mut lines: Vec<Line> = Vec::new();
-
-    lines.push(section_header("Recent Tracks", is_active, accent));
 
     if home.recent_tracks.is_empty() {
         lines.push(Line::from(Span::styled(
-            "  No play history yet \u{2014} play some tracks to see them here",
+            "  No play history yet",
             Style::default().fg(Color::DarkGray),
         )));
     } else {
-        let max_items = (area.height as usize).saturating_sub(2).min(home.recent_tracks.len());
+        let max_items = (inner.height as usize).min(home.recent_tracks.len());
         for (i, record) in home.recent_tracks.iter().enumerate().take(max_items) {
             let rel = relative_time(record.played_at);
+            // Width budget: track ~40%, artist ~30%, time fills rest.
+            let track_w = ((inner.width as usize).saturating_sub(8) * 40 / 100).max(10);
+            let artist_w = ((inner.width as usize).saturating_sub(8) * 30 / 100).max(8);
             let text = format!(
-                "  {:>2}. {:<30} {:<20} {}",
+                " {:>2}. {:<track_w$} {:<artist_w$} {}",
                 i + 1,
-                truncate(&record.track_name, 30),
-                truncate(&record.artist_name, 20),
+                truncate(&record.track_name, track_w),
+                truncate(&record.artist_name, artist_w),
                 rel,
+                track_w = track_w,
+                artist_w = artist_w,
             );
             let selected = is_active && home.selected_index == i;
             let style = if selected {
@@ -310,76 +331,82 @@ fn render_recent_tracks(f: &mut Frame, area: Rect, home: &HomeState, accent: Col
         }
     }
 
-    f.render_widget(Paragraph::new(lines), area);
+    f.render_widget(Paragraph::new(lines), inner);
 }
 
-fn render_top_artists(f: &mut Frame, area: Rect, home: &HomeState, accent: Color) {
-    let is_active = home.active_section == HomeSection::TopArtists;
-    let mut lines: Vec<Line> = Vec::new();
-
-    lines.push(section_header("Top Artists", is_active, accent));
-
-    if home.top_artists.is_empty() {
-        lines.push(Line::from(Span::styled(
-            "  Play some music to see your top artists",
-            Style::default().fg(Color::DarkGray),
-        )));
-    } else {
-        let max_items = (area.height as usize).saturating_sub(2).min(home.top_artists.len());
-        for (i, (_, name, count)) in home.top_artists.iter().enumerate().take(max_items) {
-            let text = format!(
-                "  {:>2}. {:<35} {} plays",
-                i + 1,
-                truncate(name, 35),
-                count,
-            );
-            let selected = is_active && home.selected_index == i;
-            let style = if selected {
-                Style::default().bg(accent).fg(Color::Black)
-            } else {
-                Style::default()
-            };
-            lines.push(Line::from(Span::styled(text, style)));
-        }
-    }
-
-    f.render_widget(Paragraph::new(lines), area);
-}
-
-fn render_rediscover(f: &mut Frame, area: Rect, home: &HomeState, accent: Color) {
+fn render_rediscover_block(f: &mut Frame, area: Rect, home: &HomeState, accent: Color) {
     let is_active = home.active_section == HomeSection::Rediscover;
-    let mut lines: Vec<Line> = Vec::new();
+    let block = titled_block(" Rediscover ", is_active, accent);
+    let inner = block.inner(area);
+    f.render_widget(block, area);
 
-    lines.push(section_header("Rediscover", is_active, accent));
+    if inner.height == 0 {
+        return;
+    }
+
+    let mut lines: Vec<Line> = Vec::new();
 
     if home.rediscover.is_empty() {
         lines.push(Line::from(Span::styled(
-            "  Listen to more music to unlock rediscover suggestions",
+            "  Listen to more music to unlock suggestions",
             Style::default().fg(Color::DarkGray),
         )));
     } else {
-        let names: Vec<&str> = home.rediscover.iter().map(|(_, n)| n.as_str()).collect();
-        let suggestion = format!("  Try: {}", names.join(", "));
-        lines.push(Line::from(Span::raw(suggestion)));
+        let max_items = (inner.height as usize).saturating_sub(1).min(home.rediscover.len());
+        for (i, (_, name)) in home.rediscover.iter().enumerate().take(max_items) {
+            let text = format!(" {:>2}. {}", i + 1, truncate(name, inner.width as usize - 6));
+            let selected = is_active && home.selected_index == i;
+            let style = if selected {
+                Style::default().bg(accent).fg(Color::Black)
+            } else {
+                Style::default()
+            };
+            lines.push(Line::from(Span::styled(text, style)));
+        }
     }
 
-    lines.push(Line::from(Span::styled(
-        "  Press r to re-roll",
-        Style::default().fg(Color::DarkGray),
-    )));
+    // Re-roll hint on the last row.
+    if inner.height > 0 {
+        // Pad with empty lines to push the hint to the bottom.
+        while lines.len() < inner.height.saturating_sub(1) as usize {
+            lines.push(Line::from(""));
+        }
+        lines.push(Line::from(Span::styled(
+            "  Press r to re-roll",
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
 
-    f.render_widget(Paragraph::new(lines), area);
+    f.render_widget(Paragraph::new(lines), inner);
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 /// Truncate `s` to at most `max` characters, adding `…` if truncated.
 fn truncate(s: &str, max: usize) -> String {
+    if max == 0 { return String::new(); }
     if s.chars().count() <= max {
         s.to_string()
     } else {
         let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
         out.push('\u{2026}'); // …
         out
+    }
+}
+
+/// Pad `s` to exactly `width` chars, or truncate with `…` if longer.
+fn pad_or_truncate(s: &str, width: usize) -> String {
+    if width == 0 { return String::new(); }
+    let count = s.chars().count();
+    if count == width {
+        s.to_string()
+    } else if count < width {
+        let mut out = s.to_string();
+        for _ in 0..(width - count) {
+            out.push(' ');
+        }
+        out
+    } else {
+        truncate(s, width)
     }
 }
