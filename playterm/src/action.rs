@@ -37,6 +37,8 @@ pub enum Action {
     SearchCancel,
     /// Toggle dynamic accent colour extraction from album art.
     ToggleDynamicTheme,
+    /// Toggle the lyrics overlay on the NowPlaying tab.
+    ToggleLyrics,
     Quit,
     None,
 }

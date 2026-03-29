@@ -15,6 +15,8 @@ struct FileConfig {
     pub keybinds: KeybindsSection,
     #[serde(default)]
     pub theme: ThemeSection,
+    #[serde(default)]
+    pub ui: UiSection,
 }
 
 // ── [keybinds] ────────────────────────────────────────────────────────────────
@@ -45,6 +47,16 @@ pub struct KeybindsSection {
 }
 
 // ── [theme] ───────────────────────────────────────────────────────────────────
+
+// ── [ui] ─────────────────────────────────────────────────────────────────────
+
+/// UI preferences from config.toml.
+#[derive(Debug, Serialize, Deserialize, Default, Clone)]
+pub struct UiSection {
+    /// Show the lyrics overlay on the NowPlaying tab by default. Default: false.
+    #[serde(default)]
+    pub lyrics: bool,
+}
 
 /// Raw hex colour strings from config.toml. Defaults inside `Theme::from_section`.
 #[derive(Debug, Serialize, Deserialize, Default, Clone)]
@@ -100,6 +112,8 @@ pub struct Config {
     pub keybinds: KeybindsSection,
     /// Raw theme colour strings — parsed into `Theme` by `App::new`.
     pub theme:    ThemeSection,
+    /// Whether to show the lyrics overlay on startup.
+    pub lyrics_visible: bool,
 }
 
 impl Config {
@@ -139,6 +153,7 @@ impl Config {
             max_bit_rate:   file_cfg.player.max_bit_rate,
             keybinds:       file_cfg.keybinds,
             theme:          file_cfg.theme,
+            lyrics_visible: file_cfg.ui.lyrics,
         })
     }
 }
@@ -201,6 +216,9 @@ max_bit_rate = 0   # 0 = unlimited; set e.g. 320 to cap streaming bitrate
 # border        = "#252525"   # inactive pane borders
 # border_active = "#3a3a3a"   # active pane borders
 # dynamic       = true         # extract accent colour from album art
+
+[ui]
+lyrics = false   # show lyrics overlay on NowPlaying tab (toggle with L)
 "##;
     std::fs::write(path, default_toml)
         .with_context(|| format!("writing default config to {}", path.display()))?;

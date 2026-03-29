@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use serde::{Deserialize, Serialize};
 use crate::error::SubsonicError;
 
@@ -112,6 +114,21 @@ pub struct SubsonicLibrary {
     pub artists: Vec<Artist>,
 }
 
+// ── Lyrics types ──────────────────────────────────────────────────────────────
+
+/// One line of lyrics returned by `getLyricsBySongId`.
+///
+/// `time` is `Some(offset)` for synced (LRC-style) lyrics where the line
+/// should be highlighted at the given playback position, or `None` for plain
+/// unsynced text.
+#[derive(Debug, Clone)]
+pub struct LyricLine {
+    /// Playback offset at which to highlight this line; `None` = unsynced.
+    pub time: Option<Duration>,
+    /// The lyric text.
+    pub text: String,
+}
+
 // ── Private serde envelope types ──────────────────────────────────────────────
 
 #[derive(Deserialize)]
@@ -191,3 +208,41 @@ pub(crate) struct SearchBody {
     #[serde(rename = "searchResult3")]
     pub search_result3: Option<SearchResult3>,
 }
+
+// ── OpenSubsonic getLyricsBySongId envelopes ──────────────────────────────────
+
+#[derive(Deserialize)]
+pub(crate) struct LyricsEnvelope {
+    #[serde(rename = "subsonic-response")]
+    pub response: LyricsBody,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct LyricsBody {
+    pub status: String,
+    pub lyrics_list: Option<LyricsList>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct LyricsList {
+    #[serde(default)]
+    pub structured_lyrics: Vec<StructuredLyrics>,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct StructuredLyrics {
+    pub synced: bool,
+    #[serde(default)]
+    pub line: Vec<LyricLineRaw>,
+}
+
+/// Raw lyric line from the JSON response.
+#[derive(Deserialize)]
+pub(crate) struct LyricLineRaw {
+    /// Start offset in milliseconds (only present for synced lyrics).
+    pub start: Option<i64>,
+    pub value: String,
+}
+

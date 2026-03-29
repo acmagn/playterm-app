@@ -89,6 +89,7 @@ pub fn render(app: &App, frame: &mut Frame, area: Rect) {
             (kb.prev_track.display(),    "Prev"),
             (kb.quit.display(),          "Quit"),
             ("t".to_string(),            "Dynamic"),
+            ("L".to_string(),            "Lyrics"),
         ];
 
         let host_span_w = (2 + host.len()) as u16; // "● " + host

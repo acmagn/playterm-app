@@ -16,6 +16,7 @@ use crate::config::Config;
 use crate::keybinds::Keybinds;
 use crate::state::{LibraryState, LoadingState, PlaybackState, QueueState};
 use crate::theme::Theme;
+use playterm_subsonic::LyricLine;
 
 // ── Tab ───────────────────────────────────────────────────────────────────────
 
@@ -95,6 +96,8 @@ pub enum LibraryUpdate {
     },
     /// Raw image bytes for a cover art ID fetched from Navidrome.
     CoverArt { cover_id: String, bytes: Vec<u8> },
+    /// Lyrics fetched for a song; `lines` is empty when the track has no lyrics.
+    Lyrics { song_id: String, lines: Vec<LyricLine> },
 }
 
 // ── App ───────────────────────────────────────────────────────────────────────
@@ -133,6 +136,17 @@ pub struct App {
     /// The engine uses it to discard stale downloads from rapid skips.
     play_gen: u64,
 
+    // ── Lyrics (Feature 5.2) ──────────────────────────────────────────────────
+    /// Whether the lyrics overlay is currently visible (NowPlaying tab only).
+    pub lyrics_visible: bool,
+    /// Cached lyrics: `(song_id, lines)`. Empty `lines` = server has no lyrics.
+    /// `None` = not yet fetched for the current song.
+    pub lyrics_cache: Option<(String, Vec<LyricLine>)>,
+    /// Scroll offset for unsynced lyrics (manual j/k scrolling).
+    pub lyrics_scroll: usize,
+    /// True while an async lyrics fetch is in flight.
+    pub lyrics_loading: bool,
+
     // ── Dynamic accent (Feature 5.1) ──────────────────────────────────────────
     /// Dominant colour extracted from the current track's album art.
     /// `None` = no art / no suitable colour found.
@@ -159,6 +173,7 @@ impl App {
         let keybinds = Keybinds::from_section(&config.keybinds);
         let theme    = Theme::from_section(&config.theme);
         let static_accent = theme.accent;
+        let lyrics_visible = config.lyrics_visible;
         Ok(Self {
             active_tab: Tab::Browser,
             browser_focus: BrowserColumn::Artists,
@@ -179,6 +194,10 @@ impl App {
             keybinds,
             theme,
             play_gen: 0,
+            lyrics_visible,
+            lyrics_cache: None,
+            lyrics_scroll: 0,
+            lyrics_loading: false,
             dynamic_accent: None,
             accent_current: static_accent,
             accent_lerp_from: static_accent,
@@ -288,6 +307,30 @@ impl App {
                 Err(e) => eprintln!("fetch_cover_art({cover_id}): {e}"),
             }
         });
+    }
+
+    /// Spawn a task to fetch lyrics for a song via `getLyricsBySongId`.
+    ///
+    /// Soft-fails silently — on any error an empty `lines` vec is delivered so
+    /// the UI shows "No lyrics available" rather than a loading spinner forever.
+    pub fn fetch_lyrics(&mut self, song_id: String) {
+        self.lyrics_loading = true;
+        self.lyrics_scroll = 0;
+        let client = self.subsonic.clone();
+        let tx = self.library_tx.clone();
+        tokio::spawn(async move {
+            let lines = client.get_lyrics_by_song_id(&song_id).await.unwrap_or_default();
+            let _ = tx.send(LibraryUpdate::Lyrics { song_id, lines }).await;
+        });
+    }
+
+    /// Return `true` when every line in the current lyrics cache has no timestamp
+    /// (i.e. lyrics are plain-text and must be scrolled manually).
+    pub fn lyrics_are_unsynced(&self) -> bool {
+        self.lyrics_cache
+            .as_ref()
+            .map(|(_, lines)| lines.iter().all(|l| l.time.is_none()))
+            .unwrap_or(false)
     }
 
     /// Spawn a task that fetches every album + every track for the given artist,
@@ -437,6 +480,11 @@ impl App {
                 self.art_cache = Some((cover_id, bytes));
                 self.apply_dynamic_accent(accent);
             }
+            LibraryUpdate::Lyrics { song_id, lines } => {
+                self.lyrics_loading = false;
+                self.lyrics_cache = Some((song_id, lines));
+                self.lyrics_scroll = 0;
+            }
         }
     }
 
@@ -467,6 +515,14 @@ impl App {
                     } else {
                         // Track has no cover art.
                         self.apply_dynamic_accent(None);
+                    }
+                    // Fetch lyrics if not already cached for this song.
+                    let cached_for_song = self.lyrics_cache
+                        .as_ref()
+                        .map(|(id, _)| id == &song.id)
+                        .unwrap_or(false);
+                    if !cached_for_song {
+                        self.fetch_lyrics(song.id.clone());
                     }
                     self.playback.current_song = Some(song);
                 }
@@ -508,6 +564,14 @@ impl App {
                     } else {
                         self.apply_dynamic_accent(None);
                     }
+                    // Fetch lyrics if not already cached for this song.
+                    let cached_for_song = self.lyrics_cache
+                        .as_ref()
+                        .map(|(id, _)| id == &song.id)
+                        .unwrap_or(false);
+                    if !cached_for_song {
+                        self.fetch_lyrics(song.id.clone());
+                    }
                     self.playback.current_song = Some(song);
                 }
             }
@@ -548,7 +612,25 @@ impl App {
             }
             Action::FocusLeft => self.handle_focus_left(),
             Action::FocusRight => self.handle_focus_right(),
-            Action::Navigate(dir) => self.handle_navigate(dir),
+            Action::Navigate(dir) => {
+                // On NowPlaying tab with unsynced lyrics visible, j/k scroll
+                // the lyrics pane instead of the queue.
+                if self.active_tab == Tab::NowPlaying
+                    && self.lyrics_visible
+                    && self.lyrics_are_unsynced()
+                {
+                    match dir {
+                        Direction::Up | Direction::Top => {
+                            self.lyrics_scroll = self.lyrics_scroll.saturating_sub(1);
+                        }
+                        Direction::Down | Direction::Bottom => {
+                            self.lyrics_scroll = self.lyrics_scroll.saturating_add(1);
+                        }
+                    }
+                } else {
+                    self.handle_navigate(dir);
+                }
+            }
             Action::Select => self.handle_select(),
             Action::Back => self.handle_focus_left(),
             Action::AddToQueue => self.handle_add_to_queue(),
@@ -646,6 +728,25 @@ impl App {
                 self.search_mode.query.clear();
                 self.search_mode.selected = 0;
                 self.search_filter = None;
+            }
+            Action::ToggleLyrics => {
+                // Only active on NowPlaying tab; silently ignored on Browser.
+                if self.active_tab == Tab::NowPlaying {
+                    self.lyrics_visible = !self.lyrics_visible;
+                    // Trigger a lyrics fetch if we just enabled the overlay and
+                    // nothing is cached for the current song yet.
+                    if self.lyrics_visible {
+                        if let Some(song) = self.playback.current_song.clone() {
+                            let cached = self.lyrics_cache
+                                .as_ref()
+                                .map(|(id, _)| id == &song.id)
+                                .unwrap_or(false);
+                            if !cached {
+                                self.fetch_lyrics(song.id.clone());
+                            }
+                        }
+                    }
+                }
             }
             Action::ToggleDynamicTheme => {
                 if self.theme.dynamic {
