@@ -5,6 +5,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
 
 use super::queue;
+use super::visualizer::render_visualizer;
 
 use crate::app::App;
 
@@ -17,7 +18,16 @@ pub fn render(app: &App, frame: &mut Frame, area: Rect) {
 
     render_art_placeholder(app, frame, cols[0]);
 
-    if app.lyrics_visible {
+    if app.visualizer_visible {
+        // Split the queue column: top 75% = queue, bottom 25% = visualizer pane.
+        let rows = Layout::vertical([
+            Constraint::Percentage(75),
+            Constraint::Percentage(25),
+        ])
+        .split(cols[1]);
+        queue::render(app, frame, rows[0], true);
+        render_visualizer_pane(app, frame, rows[1]);
+    } else if app.lyrics_visible {
         // Split the queue column: top 75% = queue, bottom 25% = lyrics pane.
         let rows = Layout::vertical([
             Constraint::Percentage(75),
@@ -41,6 +51,30 @@ fn render_art_placeholder(app: &App, frame: &mut Frame, area: Rect) {
         .border_style(Style::default().fg(t.border))
         .style(Style::default().bg(t.surface));
     frame.render_widget(block, area);
+}
+
+// ── Visualizer pane ───────────────────────────────────────────────────────────
+
+fn render_visualizer_pane(app: &App, frame: &mut Frame, area: Rect) {
+    let t = &app.theme;
+    let accent = app.accent();
+
+    let block = Block::default()
+        .title(" Visualizer ")
+        .title_style(Style::default().fg(accent).add_modifier(Modifier::BOLD))
+        .borders(Borders::ALL)
+        .border_type(BorderType::Plain)
+        .border_style(Style::default().fg(accent))
+        .style(Style::default().bg(t.surface));
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if inner.height == 0 || inner.width == 0 {
+        return;
+    }
+
+    render_visualizer(frame, inner, &app.spectrum_bands, accent);
 }
 
 // ── Lyrics pane ───────────────────────────────────────────────────────────────

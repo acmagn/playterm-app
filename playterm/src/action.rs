@@ -48,6 +48,8 @@ pub enum Action {
     ToggleDynamicTheme,
     /// Toggle the lyrics overlay on the NowPlaying tab.
     ToggleLyrics,
+    /// Toggle the spectrum visualizer overlay on the NowPlaying tab.
+    ToggleVisualizer,
     /// Toggle the keybind reference popup.
     ToggleHelp,
     /// Move to the next section on the Home tab (RecentAlbums → RecentTracks → TopArtists → Rediscover).

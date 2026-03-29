@@ -7,7 +7,7 @@ use anyhow::Result;
 use ratatui::style::Color;
 use tokio::sync::mpsc;
 
-use playterm_player::{PlayerCommand, PlayerEvent, spawn_player};
+use playterm_player::{PlayerCommand, PlayerEvent, SampleBuffer, spawn_player};
 use playterm_subsonic::SubsonicClient;
 
 use serde::{Deserialize, Serialize};
@@ -268,6 +268,17 @@ pub struct App {
     /// True while an async lyrics fetch is in flight.
     pub lyrics_loading: bool,
 
+    // ── Visualizer (Phase 7) ──────────────────────────────────────────────────
+    /// Shared ring buffer of the latest decoded f32 audio samples (max 4096).
+    /// Written by the audio thread via SampleTap; read here to drive the FFT.
+    pub sample_buffer: SampleBuffer,
+    /// Smoothed, normalized frequency bands for the visualizer (0.0–1.0, len=32).
+    pub spectrum_bands: Vec<f32>,
+    /// Whether the spectrum visualizer overlay is currently visible.
+    pub visualizer_visible: bool,
+    /// FFT planner — cached across frames for efficiency.
+    pub fft_planner: rustfft::FftPlanner<f32>,
+
     // ── Home tab state (Phase 6.3) ───────────────────────────────────────────
     /// Cached display data for the Home tab; refreshed on tab entry.
     pub home: HomeState,
@@ -302,7 +313,7 @@ impl App {
         let subsonic =
             SubsonicClient::new(&config.subsonic_url, &config.subsonic_user, &config.subsonic_pass)?;
         let (library_tx, library_rx) = mpsc::channel(64);
-        let (player_tx, player_rx, player_join) = spawn_player();
+        let (player_tx, player_rx, player_join, sample_buffer) = spawn_player();
         // Apply configured default volume immediately.
         let _ = player_tx.send(PlayerCommand::SetVolume(config.default_volume as f32 / 100.0));
         let keybinds = Keybinds::from_section(&config.keybinds);
@@ -346,6 +357,10 @@ impl App {
             lyrics_cache: None,
             lyrics_scroll: 0,
             lyrics_loading: false,
+            sample_buffer,
+            spectrum_bands: vec![0.0; 32],
+            visualizer_visible: false,
+            fft_planner: rustfft::FftPlanner::new(),
             dynamic_accent: None,
             accent_current: static_accent,
             accent_lerp_from: static_accent,
@@ -367,6 +382,25 @@ impl App {
         } else {
             None
         })
+    }
+
+    /// Read from the sample buffer and compute FFT bands if the visualizer is on.
+    /// Call once per render tick before `terminal.draw()`.
+    pub fn tick_visualizer(&mut self) {
+        if !self.visualizer_visible {
+            return;
+        }
+        let samples = match self.sample_buffer.lock() {
+            Ok(g) => g.clone(),
+            Err(_) => return,
+        };
+        let new_bands = crate::visualizer::compute_bands(
+            &samples,
+            &mut self.fft_planner,
+            &self.spectrum_bands,
+            32,
+        );
+        self.spectrum_bands = new_bands;
     }
 
     /// Returns true while a colour transition is in progress.
@@ -1207,6 +1241,16 @@ impl App {
                                 );
                             }
                         }
+                    }
+                }
+            }
+            Action::ToggleVisualizer => {
+                if self.active_tab == Tab::NowPlaying {
+                    self.visualizer_visible = !self.visualizer_visible;
+                    if self.visualizer_visible {
+                        self.lyrics_visible = false;
+                    } else {
+                        self.spectrum_bands = vec![0.0; 32];
                     }
                 }
             }
