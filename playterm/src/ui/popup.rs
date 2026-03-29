@@ -47,9 +47,8 @@ fn sections() -> Vec<(&'static str, Vec<(&'static str, &'static str)>)> {
             ("V",     "Toggle visualizer"),
         ]),
         ("App", vec![
-            ("i",          "Toggle this help"),
-            ("q",          "Quit (or close help)"),
-            ("Media keys", "Play/pause/next/prev (system)"),
+            ("i", "Toggle this help"),
+            ("q", "Quit (or close help)"),
         ]),
     ]
 }
