@@ -2,6 +2,7 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use rodio::source::SeekError;
 use rodio::{ChannelCount, SampleRate, Source};
 
 pub struct SampleTap<S: Source<Item = f32>> {
@@ -34,4 +35,12 @@ impl<S: Source<Item = f32>> Source for SampleTap<S> {
     fn channels(&self) -> ChannelCount { self.inner.channels() }
     fn sample_rate(&self) -> SampleRate { self.inner.sample_rate() }
     fn total_duration(&self) -> Option<Duration> { self.inner.total_duration() }
+
+    fn try_seek(&mut self, pos: Duration) -> Result<(), SeekError> {
+        // Flush stale samples so the visualizer doesn't show pre-seek audio.
+        if let Ok(mut buf) = self.buffer.try_lock() {
+            buf.clear();
+        }
+        self.inner.try_seek(pos)
+    }
 }
