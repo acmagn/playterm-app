@@ -13,6 +13,8 @@ mod ui;
 
 use std::io;
 use std::process;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::Result;
@@ -65,6 +67,25 @@ async fn main() -> Result<()> {
     // Begin fetching artists immediately.
     app.fetch_artists();
 
+    // Spawn a task that sets a flag on SIGTERM or SIGHUP so the main loop
+    // can shut down cleanly (same path as pressing `q`).
+    let signal_quit = Arc::new(AtomicBool::new(false));
+    {
+        let flag = signal_quit.clone();
+        tokio::spawn(async move {
+            use tokio::signal::unix::{signal, SignalKind};
+            let mut sigterm = signal(SignalKind::terminate())
+                .expect("failed to install SIGTERM handler");
+            let mut sighup = signal(SignalKind::hangup())
+                .expect("failed to install SIGHUP handler");
+            tokio::select! {
+                _ = sigterm.recv() => {}
+                _ = sighup.recv()  => {}
+            }
+            flag.store(true, Ordering::Relaxed);
+        });
+    }
+
     // Set up terminal.
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -73,7 +94,7 @@ async fn main() -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let result = run_loop(&mut terminal, &mut app).await;
+    let result = run_loop(&mut terminal, &mut app, signal_quit).await;
 
     // Clear any Kitty images before leaving the alternate screen.
     if app.kitty_supported {
@@ -92,6 +113,7 @@ async fn main() -> Result<()> {
 async fn run_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut App,
+    signal_quit: Arc<AtomicBool>,
 ) -> Result<()> {
     // `last_rendered_art` — the (cover_id, rect) of the last full image
     // transmission.  Kept across tab switches so we can detect whether a
@@ -106,6 +128,11 @@ async fn run_loop(
     let mut last_tab = app.active_tab;
 
     loop {
+        // Check for SIGTERM / SIGHUP from the signal handler task.
+        if signal_quit.load(Ordering::Relaxed) {
+            app.should_quit = true;
+        }
+
         // Drain library updates from background tokio tasks.
         while let Ok(update) = app.library_rx.try_recv() {
             app.apply_library_update(update);
