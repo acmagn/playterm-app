@@ -136,6 +136,10 @@ pub struct App {
     /// The engine uses it to discard stale downloads from rapid skips.
     play_gen: u64,
 
+    // ── Help popup (Feature 5.2.1) ────────────────────────────────────────────
+    /// Whether the keybind reference popup is open.
+    pub help_visible: bool,
+
     // ── Lyrics (Feature 5.2) ──────────────────────────────────────────────────
     /// Whether the lyrics overlay is currently visible (NowPlaying tab only).
     pub lyrics_visible: bool,
@@ -194,6 +198,7 @@ impl App {
             keybinds,
             theme,
             play_gen: 0,
+            help_visible: false,
             lyrics_visible,
             lyrics_cache: None,
             lyrics_scroll: 0,
@@ -620,6 +625,7 @@ impl App {
 
     pub fn dispatch(&mut self, action: Action) {
         match action {
+            Action::ToggleHelp => self.help_visible = !self.help_visible,
             Action::Quit => self.should_quit = true,
             Action::SwitchTab => {
                 self.active_tab = self.active_tab.toggle();

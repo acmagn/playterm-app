@@ -33,7 +33,8 @@ impl KeySpec {
         }
     }
 
-    /// Human-readable label for display in the status bar legend.
+    /// Human-readable label for display purposes.
+    #[allow(dead_code)]
     pub fn display(&self) -> String {
         match self.code {
             KeyCode::Char(c) if c.is_uppercase() => {

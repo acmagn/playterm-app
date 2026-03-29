@@ -5,6 +5,7 @@ pub mod kitty_art;
 pub mod layout;
 pub mod now_playing;
 pub mod nowplaying_tab;
+pub mod popup;
 pub mod queue;
 pub mod status_bar;
 pub mod tracks;
@@ -32,5 +33,9 @@ pub fn render(app: &App, frame: &mut Frame) {
             now_playing::render(app, frame, areas.now_playing);
             status_bar::render(app, frame, areas.status_bar);
         }
+    }
+    // Popup renders last so it layers on top of everything.
+    if app.help_visible {
+        popup::render_help(app, frame);
     }
 }

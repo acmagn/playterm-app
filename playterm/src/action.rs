@@ -39,6 +39,8 @@ pub enum Action {
     ToggleDynamicTheme,
     /// Toggle the lyrics overlay on the NowPlaying tab.
     ToggleLyrics,
+    /// Toggle the keybind reference popup.
+    ToggleHelp,
     Quit,
     None,
 }

@@ -165,7 +165,9 @@ async fn run_loop(
                     // Only process key-press events; ignore release/repeat to avoid
                     // double-firing on terminals that send all event kinds (e.g. Kitty).
                     if key.kind == KeyEventKind::Press {
-                        let action = if app.search_mode.active {
+                        let action = if app.help_visible {
+                            map_help_key(key.code, key.modifiers, &app.keybinds)
+                        } else if app.search_mode.active {
                             map_search_key(key.code)
                         } else {
                             map_key(key.code, key.modifiers, app.active_tab, &app.keybinds)
@@ -223,6 +225,8 @@ fn map_key(code: KeyCode, modifiers: KeyModifiers, active_tab: Tab, kb: &Keybind
     if code == KeyCode::Char(' ') { return Action::PlayPause; }
     // '=' is always a secondary alias for volume_up (easy to hit with +)
     if code == KeyCode::Char('=') { return Action::VolumeUp; }
+    // 'i' toggles the keybind help popup
+    if code == KeyCode::Char('i') && modifiers.is_empty() { return Action::ToggleHelp; }
     // 't' toggles dynamic accent colour
     if code == KeyCode::Char('t') && modifiers.is_empty() { return Action::ToggleDynamicTheme; }
     // 'L' toggles lyrics overlay (NowPlaying tab only)
@@ -281,6 +285,16 @@ fn map_search_key(code: KeyCode) -> Action {
         KeyCode::Char(ch) => Action::SearchInput(ch),
         _ => Action::None,
     }
+}
+
+/// Key handler when the help popup is open.
+/// Only `i`, `Esc`, and the configured quit key close the popup — everything
+/// else is suppressed so no accidental navigation occurs.
+fn map_help_key(code: KeyCode, modifiers: KeyModifiers, kb: &Keybinds) -> Action {
+    if code == KeyCode::Char('i') && modifiers.is_empty() { return Action::ToggleHelp; }
+    if code == KeyCode::Esc                               { return Action::ToggleHelp; }
+    if kb.quit.matches(code, modifiers)                   { return Action::ToggleHelp; }
+    Action::None
 }
 
 // ── Mouse click handler ───────────────────────────────────────────────────────
