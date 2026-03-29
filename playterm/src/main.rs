@@ -107,6 +107,20 @@ async fn main() -> Result<()> {
     terminal.backend_mut().execute(LeaveAlternateScreen)?;
     terminal.show_cursor()?;
 
+    // Shut down the audio engine cleanly.
+    // Send Quit so the thread stops playback and releases the audio device.
+    // Then join with a 1-second timeout; if the thread is stuck on a network
+    // fetch (blocking download), detach it — the OS will clean it up on exit.
+    let _ = app.player_tx.send(playterm_player::PlayerCommand::Quit);
+    if let Some(handle) = app.player_join.take() {
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+        std::thread::spawn(move || {
+            let _ = handle.join();
+            let _ = done_tx.send(());
+        });
+        let _ = done_rx.recv_timeout(Duration::from_secs(1));
+    }
+
     result
 }
 

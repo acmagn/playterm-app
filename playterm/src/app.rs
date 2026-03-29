@@ -213,6 +213,8 @@ pub struct App {
     pub player_tx: std_mpsc::Sender<PlayerCommand>,
     /// Receive events from the audio engine thread.
     pub player_rx: std_mpsc::Receiver<PlayerEvent>,
+    /// Join handle for the audio engine thread; taken on shutdown.
+    pub player_join: Option<std::thread::JoinHandle<()>>,
     pub should_quit: bool,
     pub search_mode: SearchMode,
     /// Active filter applied to the current browser column after a search confirm.
@@ -300,7 +302,7 @@ impl App {
         let subsonic =
             SubsonicClient::new(&config.subsonic_url, &config.subsonic_user, &config.subsonic_pass)?;
         let (library_tx, library_rx) = mpsc::channel(64);
-        let (player_tx, player_rx) = spawn_player();
+        let (player_tx, player_rx, player_join) = spawn_player();
         // Apply configured default volume immediately.
         let _ = player_tx.send(PlayerCommand::SetVolume(config.default_volume as f32 / 100.0));
         let keybinds = Keybinds::from_section(&config.keybinds);
@@ -319,6 +321,7 @@ impl App {
             library_tx,
             player_tx,
             player_rx,
+            player_join: Some(player_join),
             config,
             should_quit: false,
             search_mode: SearchMode::default(),

@@ -36,6 +36,8 @@ pub enum PlayerCommand {
     SetVolume(f32),
     /// Seek to an absolute position in the current track.
     Seek(Duration),
+    /// Stop playback and shut down the player thread cleanly.
+    Quit,
 }
 
 /// Events sent from the player thread back to the TUI.
@@ -55,31 +57,40 @@ pub enum PlayerEvent {
 
 // ── Engine spawn ──────────────────────────────────────────────────────────────
 
-/// Spawn the player thread. Returns the command sender and event receiver
-/// for the TUI to use.
-pub fn spawn_player() -> (mpsc::Sender<PlayerCommand>, mpsc::Receiver<PlayerEvent>) {
+/// Spawn the player thread.
+///
+/// Returns `(cmd_tx, evt_rx, join_handle)`.  The caller should send
+/// `PlayerCommand::Quit` and then join the handle (with a timeout) on
+/// shutdown to ensure the audio device is released cleanly.
+pub fn spawn_player() -> (
+    mpsc::Sender<PlayerCommand>,
+    mpsc::Receiver<PlayerEvent>,
+    std::thread::JoinHandle<()>,
+) {
     let (cmd_tx, cmd_rx) = mpsc::channel::<PlayerCommand>();
     let (evt_tx, evt_rx) = mpsc::channel::<PlayerEvent>();
 
-    std::thread::Builder::new()
+    let handle = std::thread::Builder::new()
         .name("playterm-player".into())
         .spawn(move || player_thread(cmd_rx, evt_tx))
         .expect("failed to spawn player thread");
 
-    (cmd_tx, evt_rx)
+    (cmd_tx, evt_rx, handle)
 }
 
 // ── Player thread ─────────────────────────────────────────────────────────────
 
 fn player_thread(cmd_rx: mpsc::Receiver<PlayerCommand>, evt_tx: mpsc::Sender<PlayerEvent>) {
     // MixerDeviceSink must live for the duration of playback.
-    let device = match DeviceSinkBuilder::open_default_sink() {
+    let mut device = match DeviceSinkBuilder::open_default_sink() {
         Ok(d) => d,
         Err(e) => {
             let _ = evt_tx.send(PlayerEvent::Error(format!("audio device error: {e}")));
             return;
         }
     };
+    // Suppress the default stderr message on drop — we control shutdown explicitly.
+    device.log_on_drop(false);
 
     let player = Player::connect_new(&device.mixer());
 
@@ -96,11 +107,12 @@ fn player_thread(cmd_rx: mpsc::Receiver<PlayerCommand>, evt_tx: mpsc::Sender<Pla
     // Used to discard stale downloads when the user skips rapidly.
     let mut skip_gen: u64 = 0;
 
-    loop {
+    'outer: loop {
         // ── Drain all pending commands (non-blocking) ─────────────────────────
         loop {
             use mpsc::TryRecvError;
             match cmd_rx.try_recv() {
+                Ok(PlayerCommand::Quit) => break 'outer,
                 Ok(PlayerCommand::PlayUrl { url, duration, gen }) => {
                     // Before downloading, drain any further PlayUrl commands that
                     // are already queued.  This turns N rapid skips into one fetch.
@@ -125,7 +137,7 @@ fn player_thread(cmd_rx: mpsc::Receiver<PlayerCommand>, evt_tx: mpsc::Sender<Pla
                     &mut prev_elapsed,
                 ),
                 Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => return,
+                Err(TryRecvError::Disconnected) => break 'outer,
             }
         }
 
@@ -181,6 +193,11 @@ fn player_thread(cmd_rx: mpsc::Receiver<PlayerCommand>, evt_tx: mpsc::Sender<Pla
 
         std::thread::sleep(Duration::from_millis(500));
     }
+
+    // Stop playback before releasing the audio device.
+    player.stop();
+    drop(player);
+    drop(device);
 }
 
 /// Handle a `PlayUrl` command with skip-generation cancellation.
@@ -328,6 +345,10 @@ fn handle_command(
             // Update prev_elapsed so the gapless-transition heuristic isn't
             // confused by the sudden position jump.
             *prev_elapsed = pos;
+        }
+        PlayerCommand::Quit => {
+            // Handled by the 'outer break in player_thread — should not reach here.
+            unreachable!("Quit must be handled in the outer command-drain loop");
         }
     }
 }
