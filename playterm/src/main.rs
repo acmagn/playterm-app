@@ -3,6 +3,7 @@ mod app;
 mod cache;
 mod color;
 mod config;
+mod history;
 mod keybinds;
 mod lyrics;
 mod persist;
@@ -43,9 +44,22 @@ async fn main() -> Result<()> {
     // Detect Kitty graphics support before entering raw mode / alternate screen.
     app.kitty_supported = ui::kitty_art::detect_kitty_support();
 
+    // Query cell pixel dimensions (used for art strip sizing).
+    // Attempted only if Kitty is supported — non-Kitty terminals may not respond.
+    if app.kitty_supported {
+        app.cell_px = ui::kitty_art::query_cell_pixel_size();
+    }
+
     // Restore previous session state (selections, queue) before first render.
     if let Err(e) = persist::restore_state(&mut app) {
         eprintln!("warn: could not restore state: {e}");
+    }
+
+    // Load play history.
+    let history_path = history::history_path();
+    match history::PlayHistory::load(&history_path) {
+        Ok(h) => app.history = h,
+        Err(e) => eprintln!("warn: could not load history: {e}"),
     }
 
     // Begin fetching artists immediately.
@@ -150,9 +164,9 @@ async fn run_loop(
                     last_rendered_art = None;
                     art_displayed = false;
                 }
-            } else if last_tab == app::Tab::NowPlaying {
-                // Switched away from NowPlaying — remove the visible Kitty
-                // placement so it doesn't float above the browser columns.
+            } else if last_tab != app.active_tab {
+                // Switched away from any tab — clear any visible Kitty
+                // placement so it doesn't float above the new tab's content.
                 // clear_image() uses a=d,d=A which removes the on-screen
                 // placement only; the image data stays in the terminal's store,
                 // so display_image() can redisplay it instantly on tab-back.
@@ -200,6 +214,10 @@ async fn run_loop(
                         art_displayed = false;
                         last_rendered_art = None;
                     }
+                    // Clear art strip thumbnails on resize so they re-render at the new size.
+                    if app.kitty_supported && app.active_tab == app::Tab::Home {
+                        let _ = ui::kitty_art::clear_art_strip();
+                    }
                 }
                 _ => {}
             }
@@ -218,10 +236,30 @@ async fn run_loop(
     if let Err(e) = persist::save_state(app) {
         eprintln!("warn: could not save state: {e}");
     }
+    // Persist play history.
+    let history_path = history::history_path();
+    if let Err(e) = app.history.save(&history_path) {
+        eprintln!("warn: could not save history: {e}");
+    }
     Ok(())
 }
 
 fn map_key(code: KeyCode, modifiers: KeyModifiers, active_tab: Tab, kb: &Keybinds) -> Action {
+    // ── Home-tab-specific keys ────────────────────────────────────────────────
+    if active_tab == Tab::Home {
+        // J / S-j: move to next section
+        if code == KeyCode::Char('J') { return Action::HomeSectionNext; }
+        // K / S-k: move to previous section
+        if code == KeyCode::Char('K') { return Action::HomeSectionPrev; }
+        // r: re-roll rediscover / refresh data
+        if code == KeyCode::Char('r') && modifiers.is_empty() { return Action::HomeRefresh; }
+        // h/l: navigate album strip left/right (only active when RecentAlbums section is focused)
+        if code == KeyCode::Char('h') && modifiers.is_empty() { return Action::HomeAlbumLeft; }
+        if code == KeyCode::Char('l') && modifiers.is_empty() { return Action::HomeAlbumRight; }
+        // a: append selected album to queue
+        if code == KeyCode::Char('a') && modifiers.is_empty() { return Action::HomeAlbumAddToQueue; }
+    }
+
     // ── Always-on / non-configurable ─────────────────────────────────────────
     // g / G: jump to top/bottom — not exposed in config
     if code == KeyCode::Char('g') && modifiers.is_empty() { return Action::Navigate(Direction::Top);    }
@@ -244,21 +282,25 @@ fn map_key(code: KeyCode, modifiers: KeyModifiers, active_tab: Tab, kb: &Keybind
     if code == KeyCode::Down { return Action::Navigate(Direction::Down); }
 
     // ── Configurable keybinds ─────────────────────────────────────────────────
-    if kb.quit.matches(code, modifiers)       { return Action::Quit;       }
-    if kb.tab_switch.matches(code, modifiers) { return Action::SwitchTab;  }
+    if kb.quit.matches(code, modifiers)              { return Action::Quit;             }
+    if kb.tab_switch.matches(code, modifiers)        { return Action::SwitchTab;        }
+    if kb.tab_switch_reverse.matches(code, modifiers){ return Action::SwitchTabReverse; }
+    if kb.go_to_home.matches(code, modifiers)        { return Action::GoToHome;         }
+    if kb.go_to_browser.matches(code, modifiers)     { return Action::GoToBrowser;      }
+    if kb.go_to_nowplaying.matches(code, modifiers)  { return Action::GoToNowPlaying;   }
 
     // seek_forward / seek_backward are tab-aware: they also act as column
     // navigation in the Browser tab so Right/Left keep working there.
     if kb.seek_forward.matches(code, modifiers) {
         return match active_tab {
             Tab::NowPlaying => Action::SeekForward,
-            Tab::Browser    => Action::FocusRight,
+            Tab::Browser | Tab::Home => Action::FocusRight,
         };
     }
     if kb.seek_backward.matches(code, modifiers) {
         return match active_tab {
             Tab::NowPlaying => Action::SeekBackward,
-            Tab::Browser    => Action::FocusLeft,
+            Tab::Browser | Tab::Home => Action::FocusLeft,
         };
     }
 
@@ -317,6 +359,11 @@ fn handle_mouse_click(x: u16, y: u16, app: &mut App, terminal_size: ratatui::lay
             (areas.center, areas.now_playing)
         }
         Tab::NowPlaying => {
+            let areas = ui::layout::build_nowplaying(terminal_size);
+            (areas.center, areas.now_playing)
+        }
+        Tab::Home => {
+            // Home tab has no interactive content yet — ignore all clicks.
             let areas = ui::layout::build_nowplaying(terminal_size);
             (areas.center, areas.now_playing)
         }
@@ -382,6 +429,9 @@ fn handle_mouse_click(x: u16, y: u16, app: &mut App, terminal_size: ratatui::lay
     }
 
     match app.active_tab {
+        Tab::Home => {
+            // Home tab has no interactive content yet.
+        }
         Tab::Browser => {
             // 3 columns: [30% artists | 35% albums | 35% tracks]
             let browser_cols = Layout::horizontal([
