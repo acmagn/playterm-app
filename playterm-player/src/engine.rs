@@ -6,14 +6,18 @@
 //! - `PlayerCommand` (TUI → engine): play a URL, pause, resume, stop, set volume.
 //! - `PlayerEvent`  (engine → TUI): progress ticks, track-ended, errors.
 
+use std::collections::VecDeque;
 use std::io::BufReader;
-use std::sync::mpsc;
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 
 use anyhow::Result;
 use rodio::{Decoder, DeviceSinkBuilder, Player};
 
 use crate::stream::open_stream;
+use crate::tap::SampleTap;
+
+type SampleBuffer = Arc<Mutex<VecDeque<f32>>>;
 
 // ── Public channel types ──────────────────────────────────────────────────────
 
@@ -59,28 +63,35 @@ pub enum PlayerEvent {
 
 /// Spawn the player thread.
 ///
-/// Returns `(cmd_tx, evt_rx, join_handle)`.  The caller should send
+/// Returns `(cmd_tx, evt_rx, join_handle, sample_buffer)`.  The caller should send
 /// `PlayerCommand::Quit` and then join the handle (with a timeout) on
 /// shutdown to ensure the audio device is released cleanly.
+///
+/// `sample_buffer` is a ring buffer of the most recent decoded f32 samples;
+/// the TUI reads it each frame to drive the visualizer FFT.
 pub fn spawn_player() -> (
     mpsc::Sender<PlayerCommand>,
     mpsc::Receiver<PlayerEvent>,
     std::thread::JoinHandle<()>,
+    SampleBuffer,
 ) {
     let (cmd_tx, cmd_rx) = mpsc::channel::<PlayerCommand>();
     let (evt_tx, evt_rx) = mpsc::channel::<PlayerEvent>();
 
+    let sample_buffer: SampleBuffer = Arc::new(Mutex::new(VecDeque::with_capacity(4096)));
+    let thread_buffer = sample_buffer.clone();
+
     let handle = std::thread::Builder::new()
         .name("playterm-player".into())
-        .spawn(move || player_thread(cmd_rx, evt_tx))
+        .spawn(move || player_thread(cmd_rx, evt_tx, thread_buffer))
         .expect("failed to spawn player thread");
 
-    (cmd_tx, evt_rx, handle)
+    (cmd_tx, evt_rx, handle, sample_buffer)
 }
 
 // ── Player thread ─────────────────────────────────────────────────────────────
 
-fn player_thread(cmd_rx: mpsc::Receiver<PlayerCommand>, evt_tx: mpsc::Sender<PlayerEvent>) {
+fn player_thread(cmd_rx: mpsc::Receiver<PlayerCommand>, evt_tx: mpsc::Sender<PlayerEvent>, sample_buffer: SampleBuffer) {
     // MixerDeviceSink must live for the duration of playback.
     let mut device = match DeviceSinkBuilder::open_default_sink() {
         Ok(d) => d,
@@ -123,6 +134,7 @@ fn player_thread(cmd_rx: mpsc::Receiver<PlayerCommand>, evt_tx: mpsc::Sender<Pla
                         &mut current_total, &mut was_playing,
                         &mut next_total, &mut next_queued,
                         &mut about_to_finish_sent, &mut prev_elapsed,
+                        &sample_buffer,
                     );
                 }
                 Ok(cmd) => handle_command(
@@ -135,6 +147,7 @@ fn player_thread(cmd_rx: mpsc::Receiver<PlayerCommand>, evt_tx: mpsc::Sender<Pla
                     &mut next_queued,
                     &mut about_to_finish_sent,
                     &mut prev_elapsed,
+                    &sample_buffer,
                 ),
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => break 'outer,
@@ -222,6 +235,7 @@ fn play_url(
     next_queued: &mut bool,
     about_to_finish_sent: &mut bool,
     prev_elapsed: &mut Duration,
+    sample_buffer: &SampleBuffer,
 ) {
     // Update skip_gen for this command.
     *skip_gen = gen;
@@ -288,6 +302,7 @@ fn play_url(
                 current_total, was_playing,
                 next_total, next_queued,
                 about_to_finish_sent, prev_elapsed,
+                sample_buffer,
             );
         }
         return;
@@ -295,7 +310,8 @@ fn play_url(
 
     // ── Commit ────────────────────────────────────────────────────────────────
     *current_total = final_duration;
-    player.append(source);
+    let tapped = SampleTap::new(source, sample_buffer.clone());
+    player.append(tapped);
     player.play();
     let _ = evt_tx.send(PlayerEvent::TrackStarted);
 }
@@ -310,6 +326,7 @@ fn handle_command(
     next_queued: &mut bool,
     about_to_finish_sent: &mut bool,
     prev_elapsed: &mut Duration,
+    sample_buffer: &SampleBuffer,
 ) {
     match cmd {
         PlayerCommand::PlayUrl { .. } => {
@@ -321,7 +338,8 @@ fn handle_command(
                 Ok(source) => {
                     *next_total = duration;
                     *next_queued = true;
-                    player.append(source);
+                    let tapped = SampleTap::new(source, sample_buffer.clone());
+                    player.append(tapped);
                 }
                 Err(e) => {
                     let _ = evt_tx.send(PlayerEvent::Error(format!("enqueue error: {e}")));

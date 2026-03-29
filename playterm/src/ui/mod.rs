@@ -11,6 +11,7 @@ pub mod queue;
 pub mod status_bar;
 pub mod tab_bar;
 pub mod tracks;
+pub mod visualizer;
 
 use ratatui::Frame;
 use crate::app::{App, Tab};

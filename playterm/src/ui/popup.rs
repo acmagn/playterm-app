@@ -44,6 +44,7 @@ fn sections() -> Vec<(&'static str, Vec<(&'static str, &'static str)>)> {
             ("+ / -", "Volume up / down"),
             ("t",     "Toggle dynamic theme"),
             ("L",     "Toggle lyrics"),
+            ("V",     "Toggle visualizer"),
         ]),
         ("App", vec![
             ("i", "Toggle this help"),

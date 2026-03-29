@@ -10,6 +10,7 @@ mod persist;
 mod state;
 mod theme;
 mod ui;
+mod visualizer;
 
 use std::io;
 use std::process;
@@ -159,6 +160,9 @@ async fn run_loop(
         // Advance colour transition before drawing.
         app.tick_accent_transition();
 
+        // Compute FFT bands for the visualizer (no-op when not visible).
+        app.tick_visualizer();
+
         terminal.draw(|f| ui::render(app, f))?;
 
         // ── Kitty album art (rendered after ratatui so it sits above text) ──────
@@ -253,9 +257,9 @@ async fn run_loop(
         }
         last_tab = app.active_tab;
 
-        // Poll for events. During colour transitions redraw at 33 ms for
-        // smooth animation; otherwise 50 ms keeps the progress bar responsive.
-        let poll_ms = if app.accent_transition_active() { 33 } else { 50 };
+        // Poll for events. During visualizer or colour transitions redraw at
+        // 33 ms (~30 fps); otherwise 50 ms keeps the progress bar responsive.
+        let poll_ms = if app.visualizer_visible || app.accent_transition_active() { 33 } else { 50 };
         if event::poll(Duration::from_millis(poll_ms))? {
             match event::read()? {
                 Event::Key(key) => {
@@ -480,6 +484,11 @@ fn map_key(code: KeyCode, modifiers: KeyModifiers, active_tab: Tab, kb: &Keybind
     if code == KeyCode::Char('t') && modifiers.is_empty() { return Action::ToggleDynamicTheme; }
     // 'L' toggles lyrics overlay (NowPlaying tab only)
     if code == KeyCode::Char('L') { return Action::ToggleLyrics; }
+    // 'V' toggles spectrum visualizer (NowPlaying tab only)
+    let shift = modifiers.intersects(KeyModifiers::SHIFT);
+    if code == KeyCode::Char('V') || (code == KeyCode::Char('v') && shift) {
+        return Action::ToggleVisualizer;
+    }
     // Up/Down arrows are always secondary scroll aliases
     if code == KeyCode::Up   { return Action::Navigate(Direction::Up);   }
     if code == KeyCode::Down { return Action::Navigate(Direction::Down); }
