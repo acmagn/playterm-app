@@ -7,14 +7,12 @@
 //! - `PlayerEvent`  (engine → TUI): progress ticks, track-ended, errors.
 
 use std::collections::VecDeque;
-use std::io::BufReader;
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 
 use anyhow::Result;
 use rodio::{Decoder, DeviceSinkBuilder, Player};
 
-use crate::stream::open_stream;
 use crate::tap::SampleTap;
 
 type SampleBuffer = Arc<Mutex<VecDeque<f32>>>;
@@ -179,7 +177,7 @@ fn player_thread(cmd_rx: mpsc::Receiver<PlayerCommand>, evt_tx: mpsc::Sender<Pla
 
             // Send AboutToFinish ~10 s before the end so the TUI can enqueue next.
             // 10 s gives enough headroom for: player-thread sleep (≤500 ms) +
-            // TUI dispatch latency + open_stream 256 KB prebuffer + decode.
+            // TUI dispatch latency + full-track download + decode.
             if !about_to_finish_sent && !next_queued {
                 if let Some(total) = current_total {
                     let remaining = total.saturating_sub(elapsed);
@@ -359,8 +357,7 @@ fn handle_command(
         }
         PlayerCommand::SetVolume(v) => player.set_volume(v),
         PlayerCommand::Seek(pos) => {
-            let result = player.try_seek(pos);
-            eprintln!("[seek] target={:?} result={:?}", pos, result);
+            let _ = player.try_seek(pos);
             // Update prev_elapsed so the gapless-transition heuristic isn't
             // confused by the sudden position jump.
             *prev_elapsed = pos;
@@ -374,17 +371,22 @@ fn handle_command(
 
 // ── Stream + decode ───────────────────────────────────────────────────────────
 
-fn download_and_decode(url: &str) -> Result<Decoder<BufReader<crate::stream::StreamingReader>>> {
-    let reader = open_stream(url)?;
-    // with_seekable(true): tells symphonia the stream supports random access;
-    //   without this, ReadSeekSource::is_seekable() returns false and symphonia
-    //   treats the stream as forward-only, causing all seeks to fail.
-    // with_coarse_seek(true): bypasses the time_base requirement for accurate
-    //   seeking (unavailable on transcoded MP3 streams); seeks to the nearest
-    //   keyframe, which is accurate enough for a music player.
+fn download_and_decode(url: &str) -> Result<Decoder<std::io::Cursor<Vec<u8>>>> {
+    // Download the full track into RAM so symphonia gets an unambiguously
+    // seekable Cursor<Vec<u8>>.  StreamingReader over a BufReader was technically
+    // seekable but symphonia's demuxer cached seekability as false during probe,
+    // causing every try_seek to return Err(Unseekable).
+    //
+    // with_byte_len: tells symphonia the exact byte length, which also sets
+    //   is_seekable = true internally.
+    // with_coarse_seek: bypasses the time_base requirement for accurate seeking
+    //   (unavailable on transcoded MP3 streams); seeks to the nearest keyframe.
+    let bytes = reqwest::blocking::get(url)?.bytes()?;
+    let byte_len = bytes.len() as u64;
+    let cursor = std::io::Cursor::new(bytes.to_vec());
     let decoder = Decoder::builder()
-        .with_data(BufReader::new(reader))
-        .with_seekable(true)
+        .with_data(cursor)
+        .with_byte_len(byte_len)
         .with_coarse_seek(true)
         .build()?;
     Ok(decoder)
