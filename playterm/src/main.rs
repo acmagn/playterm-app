@@ -279,6 +279,9 @@ async fn run_loop(
                     app.in_tmux,
                 );
                 app.home_art_needs_redraw = false;
+                if app.in_tmux {
+                    app.home_art_last_tmux_render = Some(std::time::Instant::now());
+                }
             }
         }
         last_tab = app.active_tab;

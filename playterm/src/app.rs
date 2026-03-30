@@ -262,6 +262,9 @@ pub struct App {
     /// art strip can be re-rendered on the next frame (same pattern as tab-switch
     /// art restoration).
     pub home_art_needs_redraw: bool,
+    /// Timestamp of the last tmux art-strip render; used to batch HomeArt
+    /// arrivals so each individual fetch doesn't trigger a full re-transmit.
+    pub home_art_last_tmux_render: Option<Instant>,
 
     // ── Lyrics (Feature 5.2) ──────────────────────────────────────────────────
     /// Whether the lyrics overlay is currently visible (NowPlaying tab only).
@@ -357,6 +360,7 @@ impl App {
             prefetch_gen: Arc::new(AtomicU64::new(0)),
             help_visible: false,
             home_art_needs_redraw: false,
+            home_art_last_tmux_render: None,
             home: HomeState::default(),
             pending_artist_select: None,
             history: crate::history::PlayHistory::default(),
@@ -803,7 +807,21 @@ impl App {
                 // Signal main loop to re-render the art strip now that a new
                 // thumbnail is available in the cache.
                 if self.active_tab == Tab::Home {
-                    self.home_art_needs_redraw = true;
+                    if self.in_tmux {
+                        // In tmux mode, re-transmitting the full strip for every
+                        // individual image arrival causes visible blinking.  Only
+                        // trigger a render when all pending fetches are done, or
+                        // when 500 ms have passed since the last render (fallback
+                        // so partially-loaded strips still appear promptly).
+                        let elapsed = self.home_art_last_tmux_render
+                            .map(|t| t.elapsed().as_millis())
+                            .unwrap_or(u128::MAX);
+                        if self.home_art_loading.is_empty() || elapsed >= 500 {
+                            self.home_art_needs_redraw = true;
+                        }
+                    } else {
+                        self.home_art_needs_redraw = true;
+                    }
                 }
             }
         }
@@ -1292,7 +1310,9 @@ impl App {
                             if self.home.album_selected_index < self.home.album_scroll_offset {
                                 self.home.album_scroll_offset = self.home.album_selected_index;
                             }
-                            self.home_art_needs_redraw = true;
+                            if !self.in_tmux {
+                                self.home_art_needs_redraw = true;
+                            }
                         }
                     } else {
                         // In bottom panes: h escapes to previous section.
@@ -1313,7 +1333,9 @@ impl App {
                             if self.home.album_selected_index > scroll_end {
                                 self.home.album_scroll_offset += 1;
                             }
-                            self.home_art_needs_redraw = true;
+                            if !self.in_tmux {
+                                self.home_art_needs_redraw = true;
+                            }
                         }
                     } else {
                         // In bottom panes: l escapes to next section.
