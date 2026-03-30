@@ -171,10 +171,6 @@ async fn run_loop(
     let mut last_rendered_art: Option<(String, Rect)> = None;
     let mut art_displayed = false;
     let mut last_tab = app.active_tab;
-    // Fallback periodic clear for tmux: focus events may never fire if
-    // `focus-events on` is absent from tmux.conf.  Every 5 s, when not on
-    // NowPlaying, flush any stale Kitty images that leaked through.
-    let mut last_tmux_clear = std::time::Instant::now();
 
     loop {
         // Check for SIGTERM / SIGHUP from the signal handler task.
@@ -292,23 +288,6 @@ async fn run_loop(
         }
         last_tab = app.active_tab;
 
-        // ── Periodic tmux stale-art clear ────────────────────────────────────
-        // Focus events may never arrive if the user hasn't set
-        // `focus-events on` in tmux.conf.  As a fallback, clear any Kitty
-        // images every 5 s while not on the NowPlaying tab (where art is
-        // actively managed frame-by-frame).  No-op outside tmux.
-        if app.in_tmux && app.kitty_supported
-            && app.active_tab != app::Tab::NowPlaying
-            && last_tmux_clear.elapsed() >= std::time::Duration::from_secs(5)
-        {
-            let _ = ui::kitty_art::clear_image(app.in_tmux);
-            if app.active_tab != app::Tab::Home {
-                let _ = ui::kitty_art::clear_art_strip(app.in_tmux);
-            }
-            last_tmux_clear = std::time::Instant::now();
-            ui::kitty_art::kitty_log("periodic_clear: cleared stale images (5s fallback)");
-        }
-
         // Poll for events. During visualizer or colour transitions redraw at
         // 33 ms (~30 fps); otherwise 50 ms keeps the progress bar responsive.
         let poll_ms = if app.visualizer_visible || app.accent_transition_active() { 33 } else { 50 };
@@ -377,16 +356,9 @@ async fn run_loop(
                 Event::FocusLost => {
                     eprintln!("[debug] FocusLost received in_tmux={} kitty={}", app.in_tmux, app.kitty_supported);
                     if app.kitty_supported && app.in_tmux {
-                        // APC delete via passthrough (may race against tmux window switch).
                         let _ = ui::kitty_art::clear_image(app.in_tmux);
                         let _ = ui::kitty_art::clear_art_strip(app.in_tmux);
-                        // Belt-and-suspenders: overwrite the image cells with spaces so
-                        // tmux's next redraw has blank cells to paint over, which may
-                        // cause Ghostty to re-composite and obscure the floating image.
-                        if let Some((_, rect)) = last_rendered_art {
-                            ui::kitty_art::overwrite_image_area_with_spaces(rect);
-                        }
-                        ui::kitty_art::kitty_log("focus_lost: clear_image + clear_art_strip + space_overwrite");
+                        ui::kitty_art::kitty_log("focus_lost: clear_image + clear_art_strip");
                     }
                 }
                 Event::FocusGained => {

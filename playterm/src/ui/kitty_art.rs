@@ -131,12 +131,61 @@ fn apc(payload: &str, in_tmux: bool) -> String {
     }
 }
 
+// ── Unicode placeholder helpers ───────────────────────────────────────────────
+
+/// Combining-above diacritics used to encode the row index in each placeholder
+/// cell.  Index N → diacritic for row N.  From the Kitty graphics protocol spec:
+/// https://sw.kovidgoyal.net/kitty/graphics-protocol/#unicode-placeholders
+const ROW_DIACRITICS: &[char] = &[
+    '\u{0305}', '\u{030D}', '\u{030E}', '\u{0310}', '\u{0312}', '\u{033D}',
+    '\u{033E}', '\u{033F}', '\u{0346}', '\u{034A}', '\u{034B}', '\u{034C}',
+    '\u{0350}', '\u{0351}', '\u{0352}', '\u{0357}', '\u{035B}', '\u{0363}',
+    '\u{0364}', '\u{0365}', '\u{0366}', '\u{0367}', '\u{0368}', '\u{0369}',
+    '\u{036A}', '\u{036B}', '\u{036C}', '\u{036D}', '\u{036E}', '\u{036F}',
+    '\u{0483}', '\u{0484}',
+];
+
+/// Build the placeholder string for one row of a Unicode-placeholder image.
+///
+/// Each cell is U+10EEEE (the Kitty placeholder codepoint) with the foreground
+/// colour encoding the image ID as 24-bit RGB.  The first cell of each row also
+/// carries the combining row-diacritic so the terminal knows which image row to
+/// sample.  Subsequent cells in the same row omit the diacritic — the terminal
+/// infers the column from the cell's horizontal position.
+fn placeholder_row(cols: u16, image_id: u32, row_index: usize) -> String {
+    let r = ((image_id >> 16) & 0xFF) as u8;
+    let g = ((image_id >> 8)  & 0xFF) as u8;
+    let b = ( image_id        & 0xFF) as u8;
+    let diacritic = ROW_DIACRITICS
+        .get(row_index)
+        .copied()
+        .unwrap_or('\u{0305}');
+
+    // Set foreground colour; first cell gets the row diacritic, rest do not.
+    let mut s = format!("\x1b[38;2;{r};{g};{b}m");
+    s.push('\u{10EEEE}');
+    s.push(diacritic);
+    for _ in 1..cols {
+        s.push('\u{10EEEE}');
+    }
+    s.push_str("\x1b[0m"); // reset colour
+    s
+}
+
 // ── Rendering ─────────────────────────────────────────────────────────────────
 
 /// Render image `bytes` (JPEG/PNG/etc.) into `area` using the Kitty graphics protocol.
 ///
 /// `area` is the full widget rect (including borders); the image is placed in the
 /// inner area (1-cell border inset on all sides).  Writes directly to stdout.
+///
+/// When `in_tmux` is `false`: uses direct APC placement (`a=T` with `c=`/`r=`
+/// coordinates) — unchanged from the original implementation.
+///
+/// When `in_tmux` is `true`: uses the Unicode placeholder method so that tmux
+/// treats the image cells as normal text.  Transmits with `a=t` (store only),
+/// creates a virtual placement with `a=p,U=1`, then writes `U+10EEEE` placeholder
+/// characters row-by-row using absolute cursor positioning.
 pub fn render_image(bytes: &[u8], area: Rect, in_tmux: bool) -> Result<()> {
     use base64::Engine;
     use flate2::Compression;
@@ -171,46 +220,79 @@ pub fn render_image(bytes: &[u8], area: Rect, in_tmux: bool) -> Result<()> {
     // Base64-encode.
     let b64 = base64::engine::general_purpose::STANDARD.encode(&compressed);
 
-    // Write to stdout.
-    let mut out = io::stdout().lock();
-
-    // In tmux: delete any previous image before transmitting the new one.
-    // tmux doesn't track Kitty placements across windows/panes, so stale images
-    // bleed through without an explicit delete-all up front.
-    if in_tmux {
-        let _ = write!(out, "{}", apc("a=d,d=A,q=2", true));
-        kitty_log("render_image: pre-clear a=d,d=A,q=2");
-    }
-
-    // Move cursor to the inner-area top-left (terminal coords are 1-based).
-    write!(out, "\x1b[{};{}H", inner_y + 1, inner_x + 1)?;
-
     // Transmit the image in ≤4096-char chunks.
     const CHUNK: usize = 4096;
     let chunks: Vec<&[u8]> = b64.as_bytes().chunks(CHUNK).collect();
     let n = chunks.len();
 
-    for (i, chunk) in chunks.iter().enumerate() {
-        let is_last = i == n - 1;
-        let m = if is_last { 0u8 } else { 1u8 };
-        // SAFETY: b64 is ASCII, so each chunk is valid UTF-8.
-        let chunk_str = unsafe { std::str::from_utf8_unchecked(chunk) };
-        if i == 0 {
-            // First chunk: include all control parameters.
-            // i=1 assigns a persistent image ID so the terminal stores the image
-            // and we can redisplay it later with a=p,i=1 without re-transmitting.
+    let mut out = io::stdout().lock();
+
+    if in_tmux {
+        // ── Unicode placeholder path (tmux) ───────────────────────────────────
+        // Delete any existing virtual placement for ID=1 before re-transmitting.
+        let _ = write!(out, "{}", apc("a=d,d=i,i=1,q=2", true));
+        kitty_log("render_image: pre-clear virtual placement i=1");
+
+        // Step 1: Transmit image data only (a=t — store, no display).
+        // No placement coordinates here; the virtual placement is explicit below.
+        for (i, chunk) in chunks.iter().enumerate() {
+            let is_last = i == n - 1;
+            let m = if is_last { 0u8 } else { 1u8 };
+            let chunk_str = unsafe { std::str::from_utf8_unchecked(chunk) };
+            if i == 0 {
+                write!(
+                    out,
+                    "{}",
+                    apc(&format!("a=t,f=32,i=1,s={w},v={h},o=z,m={m},q=2;{chunk_str}"), true)
+                )?;
+                kitty_log(&format!("render_image chunk=0/{n} a=t,f=32,i=1,s={w},v={h},o=z,m={m},q=2"));
+            } else {
+                write!(out, "{}", apc(&format!("m={m};{chunk_str}"), true))?;
+                kitty_log(&format!("render_image chunk={i}/{n} m={m}"));
+            }
+        }
+
+        // Step 2: Create virtual placement (U=1 enables Unicode placeholder mode).
+        write!(
+            out,
+            "{}",
+            apc(&format!("a=p,U=1,i=1,c={inner_w},r={inner_h},q=2"), true)
+        )?;
+        kitty_log(&format!("render_image virtual placement a=p,U=1,i=1,c={inner_w},r={inner_h}"));
+
+        // Step 3: Write placeholder characters row-by-row at the image position.
+        // These are normal terminal text cells — tmux can overwrite them on window
+        // switch, which is exactly what prevents the bleed.
+        for row in 0..inner_h {
             write!(
                 out,
-                "{}",
-                apc(&format!("a=T,f=32,i=1,s={w},v={h},c={inner_w},r={inner_h},o=z,m={m},q=2;{chunk_str}"), in_tmux)
+                "\x1b[{};{}H{}",
+                inner_y + 1 + row,
+                inner_x + 1,
+                placeholder_row(inner_w, 1, row as usize)
             )?;
-            if in_tmux {
-                kitty_log(&format!("render_image chunk=0/{n} a=T,f=32,i=1,s={w},v={h},c={inner_w},r={inner_h},o=z,m={m},q=2"));
-            }
-        } else {
-            write!(out, "{}", apc(&format!("m={m};{chunk_str}"), in_tmux))?;
-            if in_tmux {
-                kitty_log(&format!("render_image chunk={i}/{n} m={m}"));
+        }
+        kitty_log(&format!("render_image placeholder chars written rows={inner_h} cols={inner_w}"));
+    } else {
+        // ── Direct placement path (non-tmux) — unchanged ──────────────────────
+        // Move cursor to the inner-area top-left (terminal coords are 1-based).
+        write!(out, "\x1b[{};{}H", inner_y + 1, inner_x + 1)?;
+
+        for (i, chunk) in chunks.iter().enumerate() {
+            let is_last = i == n - 1;
+            let m = if is_last { 0u8 } else { 1u8 };
+            let chunk_str = unsafe { std::str::from_utf8_unchecked(chunk) };
+            if i == 0 {
+                // First chunk: include all control parameters.
+                // i=1 assigns a persistent image ID so the terminal stores the
+                // image and we can redisplay it with a=p,i=1 without re-transmitting.
+                write!(
+                    out,
+                    "{}",
+                    apc(&format!("a=T,f=32,i=1,s={w},v={h},c={inner_w},r={inner_h},o=z,m={m},q=2;{chunk_str}"), false)
+                )?;
+            } else {
+                write!(out, "{}", apc(&format!("m={m};{chunk_str}"), false))?;
             }
         }
     }
@@ -221,12 +303,17 @@ pub fn render_image(bytes: &[u8], area: Rect, in_tmux: bool) -> Result<()> {
 
 // ── Clearing ──────────────────────────────────────────────────────────────────
 
-/// Delete all Kitty images currently displayed in the terminal.
+/// Delete the NowPlaying Kitty image (ID=1).
+///
+/// Non-tmux: `a=d,d=A` (delete all) — same as before.
+/// tmux: `a=d,d=i,i=1` — delete virtual placement for ID=1 specifically.
 pub fn clear_image(in_tmux: bool) -> Result<()> {
     let mut out = io::stdout().lock();
-    write!(out, "{}", apc("a=d,d=A,q=2", in_tmux))?;
     if in_tmux {
-        kitty_log("clear_image a=d,d=A,q=2");
+        write!(out, "{}", apc("a=d,d=i,i=1,q=2", true))?;
+        kitty_log("clear_image a=d,d=i,i=1,q=2 (virtual placement)");
+    } else {
+        write!(out, "{}", apc("a=d,d=A,q=2", false))?;
     }
     out.flush()?;
     Ok(())
@@ -357,13 +444,14 @@ pub fn render_art_strip(
     use flate2::Compression;
     use flate2::write::ZlibEncoder;
 
-    // In tmux: delete previous art strip placements before drawing new ones.
+    // Pre-clear previous art strip images/placements before drawing new ones.
     if in_tmux {
+        // tmux path: delete virtual placements (d=i lowercase).
         let mut out = io::stdout().lock();
         for id in 100u32..=115 {
-            let _ = write!(out, "{}", apc(&format!("a=d,d=I,i={id},q=2"), true));
+            let _ = write!(out, "{}", apc(&format!("a=d,d=i,i={id},q=2"), true));
         }
-        kitty_log("render_art_strip: pre-clear ids=100..=115");
+        kitty_log("render_art_strip: pre-clear virtual placements ids=100..=115");
     }
 
     let (thumb_cols, thumb_rows) = art_strip_thumbnail_size(cell_px, strip_area.height);
@@ -406,10 +494,7 @@ pub fn render_art_strip(
 
             let mut out = io::stdout().lock();
 
-            // Move cursor to placement position (1-based).
-            let _ = write!(out, "\x1b[{};{}H", row + 1, col + 1);
-
-            // Transmit image in chunks.
+            // Transmit image in chunks (same for both paths — a=t: store only).
             const CHUNK: usize = 4096;
             let chunks: Vec<&[u8]> = b64.as_bytes().chunks(CHUNK).collect();
             let n = chunks.len();
@@ -434,16 +519,34 @@ pub fn render_art_strip(
                 }
             }
 
-            // Place the transmitted image.
-            let _ = write!(
-                out,
-                "\x1b[{};{}H{}",
-                row + 1,
-                col + 1,
-                apc(&format!("a=p,i={kitty_id},p=1,c={thumb_cols},r={thumb_rows},q=2;"), in_tmux)
-            );
             if in_tmux {
-                kitty_log(&format!("render_art_strip id={kitty_id} a=p,p=1,c={thumb_cols},r={thumb_rows},q=2 col={col} row={row}"));
+                // ── Unicode placeholder path (tmux) ───────────────────────────
+                // Virtual placement with U=1 — tmux sees placeholder chars as normal text.
+                let _ = write!(
+                    out,
+                    "{}",
+                    apc(&format!("a=p,U=1,i={kitty_id},c={thumb_cols},r={thumb_rows},q=2"), true)
+                );
+                // Write placeholder characters row-by-row at the thumbnail position.
+                for pr in 0..thumb_rows {
+                    let _ = write!(
+                        out,
+                        "\x1b[{};{}H{}",
+                        row + 1 + pr,
+                        col + 1,
+                        placeholder_row(thumb_cols, kitty_id, pr as usize)
+                    );
+                }
+                kitty_log(&format!("render_art_strip id={kitty_id} a=p,U=1 placeholder rows={thumb_rows} col={col} row={row}"));
+            } else {
+                // ── Direct placement path (non-tmux) — unchanged ──────────────
+                let _ = write!(
+                    out,
+                    "\x1b[{};{}H{}",
+                    row + 1,
+                    col + 1,
+                    apc(&format!("a=p,i={kitty_id},p=1,c={thumb_cols},r={thumb_rows},q=2;"), false)
+                );
             }
             let _ = out.flush();
         }
@@ -452,41 +555,23 @@ pub fn render_art_strip(
     }
 }
 
-/// Delete all Kitty art-strip placements (IDs 100–115).
+/// Delete all Kitty art-strip images/placements (IDs 100–115).
 ///
-/// Call on tab departure or terminal resize to remove strip images from screen.
+/// Non-tmux: `a=d,d=I` — deletes image data and all placements.
+/// tmux: `a=d,d=i` — deletes virtual placements; image data freed separately.
+/// Call on tab departure or terminal resize.
 pub fn clear_art_strip(in_tmux: bool) -> Result<()> {
     let mut out = io::stdout().lock();
     for id in 100u32..=115 {
-        write!(out, "{}", apc(&format!("a=d,d=I,i={id},q=2"), in_tmux))?;
+        if in_tmux {
+            write!(out, "{}", apc(&format!("a=d,d=i,i={id},q=2"), true))?;
+        } else {
+            write!(out, "{}", apc(&format!("a=d,d=I,i={id},q=2"), false))?;
+        }
     }
     if in_tmux {
-        kitty_log("clear_art_strip a=d,d=I ids=100..=115");
+        kitty_log("clear_art_strip a=d,d=i ids=100..=115 (virtual placements)");
     }
     out.flush()?;
     Ok(())
-}
-
-/// Overwrite the cells occupied by a rendered image with spaces.
-///
-/// Alternative / supplementary clearing for tmux: writing blanks to the cells
-/// may cause Ghostty to re-composite and obscure the floating image layer when
-/// tmux redraws the screen for a window switch.  Called alongside the APC
-/// delete on focus-loss.  `area` is the full widget rect (same as passed to
-/// `render_image`).
-pub fn overwrite_image_area_with_spaces(area: Rect) {
-    let inner_x = area.x + 1;
-    let inner_y = area.y + 1;
-    let inner_w = area.width.saturating_sub(2) as usize;
-    let inner_h = area.height.saturating_sub(2);
-    if inner_w == 0 || inner_h == 0 {
-        return;
-    }
-    let blanks = " ".repeat(inner_w);
-    let mut out = io::stdout().lock();
-    for row in 0..inner_h {
-        // Terminal cursor positions are 1-based.
-        let _ = write!(out, "\x1b[{};{}H{}", inner_y + 1 + row, inner_x + 1, blanks);
-    }
-    let _ = out.flush();
 }
