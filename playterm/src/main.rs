@@ -44,16 +44,23 @@ async fn main() -> Result<()> {
     });
     let mut app = App::new(config)?;
 
-    // Detect Kitty graphics support before entering raw mode / alternate screen.
-    app.kitty_supported = ui::kitty_art::detect_kitty_support();
-
-    // Detect tmux: $TMUX is set when the process is running inside a tmux session.
+    // Detect tmux first: $TMUX is set when running inside a tmux session.
     app.in_tmux = std::env::var("TMUX").is_ok();
+
+    // Detect Kitty graphics support before entering raw mode / alternate screen.
+    // Inside tmux the probe fails — tmux intercepts the APC response before it
+    // reaches us. Assume the outer terminal supports Kitty when in_tmux is true;
+    // the user would not have enabled passthrough otherwise.
+    app.kitty_supported = if app.in_tmux {
+        true
+    } else {
+        ui::kitty_art::detect_kitty_support()
+    };
 
     // Log detection results when running inside tmux (debug aid for Kitty issues).
     if app.in_tmux {
         ui::kitty_art::kitty_log(&format!(
-            "startup: in_tmux=true kitty_supported={}",
+            "startup: in_tmux=true kitty_supported={} (probe skipped)",
             app.kitty_supported
         ));
     }
