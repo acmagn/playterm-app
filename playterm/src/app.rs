@@ -223,6 +223,9 @@ pub struct App {
     /// Whether the running terminal supports the Kitty graphics protocol.
     /// Set once by `main` before the TUI loop starts.
     pub kitty_supported: bool,
+    /// Whether playterm is running inside a tmux session.
+    /// Set once by `main` at startup via `$TMUX` env var.
+    pub in_tmux: bool,
     /// Terminal cell pixel dimensions `(width_px, height_px)`.
     /// Queried once at startup; `None` if unavailable (fallback: 8×16).
     pub cell_px: Option<(u16, u16)>,
@@ -338,6 +341,7 @@ impl App {
             search_mode: SearchMode::default(),
             search_filter: None,
             kitty_supported: false,
+            in_tmux: false,
             cell_px: None,
             art_cache: None,
             home_art_cache: HashMap::new(),
@@ -1037,7 +1041,7 @@ impl App {
                     if !was_visible {
                         // Opening popup on Home tab — clear art strip so it doesn't
                         // bleed through the popup overlay.
-                        let _ = crate::ui::kitty_art::clear_art_strip();
+                        let _ = crate::ui::kitty_art::clear_art_strip(self.in_tmux);
                     } else {
                         // Closing popup on Home tab — request art strip redraw on next frame.
                         self.home_art_needs_redraw = true;
@@ -1047,9 +1051,9 @@ impl App {
             Action::Quit => self.should_quit = true,
             Action::SwitchTab => {
                 if self.kitty_supported {
-                    let _ = crate::ui::kitty_art::clear_image();
+                    let _ = crate::ui::kitty_art::clear_image(self.in_tmux);
                     if self.active_tab == Tab::Home {
-                        let _ = crate::ui::kitty_art::clear_art_strip();
+                        let _ = crate::ui::kitty_art::clear_art_strip(self.in_tmux);
                     }
                 }
                 self.active_tab = self.active_tab.next();
@@ -1061,9 +1065,9 @@ impl App {
             }
             Action::SwitchTabReverse => {
                 if self.kitty_supported {
-                    let _ = crate::ui::kitty_art::clear_image();
+                    let _ = crate::ui::kitty_art::clear_image(self.in_tmux);
                     if self.active_tab == Tab::Home {
-                        let _ = crate::ui::kitty_art::clear_art_strip();
+                        let _ = crate::ui::kitty_art::clear_art_strip(self.in_tmux);
                     }
                 }
                 self.active_tab = self.active_tab.prev();
@@ -1074,7 +1078,7 @@ impl App {
                 }
             }
             Action::GoToHome => {
-                if self.kitty_supported { let _ = crate::ui::kitty_art::clear_image(); }
+                if self.kitty_supported { let _ = crate::ui::kitty_art::clear_image(self.in_tmux); }
                 self.active_tab = Tab::Home;
                 self.search_filter = None;
                 self.refresh_home_data();
@@ -1082,9 +1086,9 @@ impl App {
             }
             Action::GoToBrowser => {
                 if self.kitty_supported {
-                    let _ = crate::ui::kitty_art::clear_image();
+                    let _ = crate::ui::kitty_art::clear_image(self.in_tmux);
                     if self.active_tab == Tab::Home {
-                        let _ = crate::ui::kitty_art::clear_art_strip();
+                        let _ = crate::ui::kitty_art::clear_art_strip(self.in_tmux);
                     }
                 }
                 self.active_tab = Tab::Browser;
@@ -1093,9 +1097,9 @@ impl App {
             }
             Action::GoToNowPlaying => {
                 if self.kitty_supported {
-                    let _ = crate::ui::kitty_art::clear_image();
+                    let _ = crate::ui::kitty_art::clear_image(self.in_tmux);
                     if self.active_tab == Tab::Home {
-                        let _ = crate::ui::kitty_art::clear_art_strip();
+                        let _ = crate::ui::kitty_art::clear_art_strip(self.in_tmux);
                     }
                 }
                 self.active_tab = Tab::NowPlaying;
@@ -1610,8 +1614,8 @@ impl App {
                 if let Some(album) = self.home.recent_albums.get(idx) {
                     let artist_name = album.artist_name.clone();
                     if self.kitty_supported {
-                        let _ = crate::ui::kitty_art::clear_image();
-                        let _ = crate::ui::kitty_art::clear_art_strip();
+                        let _ = crate::ui::kitty_art::clear_image(self.in_tmux);
+                        let _ = crate::ui::kitty_art::clear_art_strip(self.in_tmux);
                     }
                     self.pending_artist_select = Some(artist_name);
                     self.active_tab = Tab::Browser;
@@ -1672,8 +1676,8 @@ impl App {
             HomeSection::TopArtists => {
                 // Switch to Browser tab.
                 if self.kitty_supported {
-                    let _ = crate::ui::kitty_art::clear_image();
-                    let _ = crate::ui::kitty_art::clear_art_strip();
+                    let _ = crate::ui::kitty_art::clear_image(self.in_tmux);
+                    let _ = crate::ui::kitty_art::clear_art_strip(self.in_tmux);
                 }
                 self.active_tab = Tab::Browser;
                 self.search_filter = None;
@@ -1684,8 +1688,8 @@ impl App {
                     self.pending_artist_select = Some(artist_name.clone());
                 }
                 if self.kitty_supported {
-                    let _ = crate::ui::kitty_art::clear_image();
-                    let _ = crate::ui::kitty_art::clear_art_strip();
+                    let _ = crate::ui::kitty_art::clear_image(self.in_tmux);
+                    let _ = crate::ui::kitty_art::clear_art_strip(self.in_tmux);
                 }
                 self.active_tab = Tab::Browser;
                 self.apply_pending_artist_select();

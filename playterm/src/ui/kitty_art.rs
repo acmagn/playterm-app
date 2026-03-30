@@ -86,13 +86,30 @@ pub fn detect_kitty_support() -> bool {
     result
 }
 
+// ── tmux passthrough helper ───────────────────────────────────────────────────
+
+/// Build a Kitty APC sequence, optionally wrapped for tmux DCS passthrough.
+///
+/// Normal:  `\x1b_G{payload}\x1b\\`
+/// tmux:    `\x1bPtmux;\x1b\x1b_G{payload}\x1b\x1b\\\x1b\\`
+///
+/// When running inside tmux every `\x1b` inside the passthrough payload must be
+/// doubled so tmux forwards the inner sequence verbatim to the outer terminal.
+fn apc(payload: &str, in_tmux: bool) -> String {
+    if in_tmux {
+        format!("\x1bPtmux;\x1b\x1b_G{}\x1b\x1b\\\x1b\\", payload)
+    } else {
+        format!("\x1b_G{}\x1b\\", payload)
+    }
+}
+
 // ── Rendering ─────────────────────────────────────────────────────────────────
 
 /// Render image `bytes` (JPEG/PNG/etc.) into `area` using the Kitty graphics protocol.
 ///
 /// `area` is the full widget rect (including borders); the image is placed in the
 /// inner area (1-cell border inset on all sides).  Writes directly to stdout.
-pub fn render_image(bytes: &[u8], area: Rect) -> Result<()> {
+pub fn render_image(bytes: &[u8], area: Rect, in_tmux: bool) -> Result<()> {
     use base64::Engine;
     use flate2::Compression;
     use flate2::write::ZlibEncoder;
@@ -148,10 +165,11 @@ pub fn render_image(bytes: &[u8], area: Rect) -> Result<()> {
             // and we can redisplay it later with a=p,i=1 without re-transmitting.
             write!(
                 out,
-                "\x1b_Ga=T,f=32,i=1,s={w},v={h},c={inner_w},r={inner_h},o=z,m={m},q=2;{chunk_str}\x1b\\"
+                "{}",
+                apc(&format!("a=T,f=32,i=1,s={w},v={h},c={inner_w},r={inner_h},o=z,m={m},q=2;{chunk_str}"), in_tmux)
             )?;
         } else {
-            write!(out, "\x1b_Gm={m};{chunk_str}\x1b\\")?;
+            write!(out, "{}", apc(&format!("m={m};{chunk_str}"), in_tmux))?;
         }
     }
 
@@ -162,9 +180,9 @@ pub fn render_image(bytes: &[u8], area: Rect) -> Result<()> {
 // ── Clearing ──────────────────────────────────────────────────────────────────
 
 /// Delete all Kitty images currently displayed in the terminal.
-pub fn clear_image() -> Result<()> {
+pub fn clear_image(in_tmux: bool) -> Result<()> {
     let mut out = io::stdout().lock();
-    write!(out, "\x1b_Ga=d,d=A,q=2\x1b\\")?;
+    write!(out, "{}", apc("a=d,d=A,q=2", in_tmux))?;
     out.flush()?;
     Ok(())
 }
@@ -288,6 +306,7 @@ pub fn render_art_strip(
     cell_px: Option<(u16, u16)>,
     terminal_col_offset: u16,
     terminal_row_offset: u16,
+    in_tmux: bool,
 ) {
     use base64::Engine;
     use flate2::Compression;
@@ -347,19 +366,21 @@ pub fn render_art_strip(
                 if ci == 0 {
                     let _ = write!(
                         out,
-                        "\x1b_Ga=t,f=32,i={kitty_id},s={w},v={h},o=z,m={m},q=2;{chunk_str}\x1b\\"
+                        "{}",
+                        apc(&format!("a=t,f=32,i={kitty_id},s={w},v={h},o=z,m={m},q=2;{chunk_str}"), in_tmux)
                     );
                 } else {
-                    let _ = write!(out, "\x1b_Gm={m};{chunk_str}\x1b\\");
+                    let _ = write!(out, "{}", apc(&format!("m={m};{chunk_str}"), in_tmux));
                 }
             }
 
             // Place the transmitted image.
             let _ = write!(
                 out,
-                "\x1b[{};{}H\x1b_Ga=p,i={kitty_id},p=1,c={thumb_cols},r={thumb_rows},q=2;\x1b\\",
+                "\x1b[{};{}H{}",
                 row + 1,
                 col + 1,
+                apc(&format!("a=p,i={kitty_id},p=1,c={thumb_cols},r={thumb_rows},q=2;"), in_tmux)
             );
             let _ = out.flush();
         }
@@ -371,10 +392,10 @@ pub fn render_art_strip(
 /// Delete all Kitty art-strip placements (IDs 100–115).
 ///
 /// Call on tab departure or terminal resize to remove strip images from screen.
-pub fn clear_art_strip() -> Result<()> {
+pub fn clear_art_strip(in_tmux: bool) -> Result<()> {
     let mut out = io::stdout().lock();
     for id in 100u32..=115 {
-        write!(out, "\x1b_Ga=d,d=I,i={id},q=2\x1b\\")?;
+        write!(out, "{}", apc(&format!("a=d,d=I,i={id},q=2"), in_tmux))?;
     }
     out.flush()?;
     Ok(())

@@ -47,6 +47,9 @@ async fn main() -> Result<()> {
     // Detect Kitty graphics support before entering raw mode / alternate screen.
     app.kitty_supported = ui::kitty_art::detect_kitty_support();
 
+    // Detect tmux: $TMUX is set when the process is running inside a tmux session.
+    app.in_tmux = std::env::var("TMUX").is_ok();
+
     // Query cell pixel dimensions (used for art strip sizing).
     // Attempted only if Kitty is supported — non-Kitty terminals may not respond.
     if app.kitty_supported {
@@ -99,7 +102,7 @@ async fn main() -> Result<()> {
 
     // Clear any Kitty images before leaving the alternate screen.
     if app.kitty_supported {
-        let _ = ui::kitty_art::clear_image();
+        let _ = ui::kitty_art::clear_image(app.in_tmux);
     }
 
     // Restore terminal regardless of errors.
@@ -181,7 +184,7 @@ async fn run_loop(
                     // Popup is open — clear any displayed art so the Kitty
                     // image doesn't paint over the ratatui popup layer.
                     if art_displayed {
-                        let _ = ui::kitty_art::clear_image();
+                        let _ = ui::kitty_art::clear_image(app.in_tmux);
                         art_displayed = false;
                     }
                 } else if let Some((cover_id, bytes)) = &app.art_cache {
@@ -197,7 +200,7 @@ async fn run_loop(
                     } else {
                         // Album changed, first display, tab return, or terminal
                         // was resized — full re-encode and re-transmit.
-                        match ui::kitty_art::render_image(bytes, art_rect) {
+                        match ui::kitty_art::render_image(bytes, art_rect, app.in_tmux) {
                             Ok(()) => {
                                 last_rendered_art = Some((cover_id.clone(), art_rect));
                                 art_displayed = true;
@@ -207,7 +210,7 @@ async fn run_loop(
                     }
                 } else if art_displayed {
                     // In NowPlaying tab but no art — clear any stale image.
-                    let _ = ui::kitty_art::clear_image();
+                    let _ = ui::kitty_art::clear_image(app.in_tmux);
                     last_rendered_art = None;
                     art_displayed = false;
                 }
@@ -215,7 +218,7 @@ async fn run_loop(
                 // Switched away from any tab — clear any visible Kitty
                 // placement so it doesn't float above the new tab's content.
                 if art_displayed {
-                    let _ = ui::kitty_art::clear_image();
+                    let _ = ui::kitty_art::clear_image(app.in_tmux);
                     art_displayed = false;
                 }
             }
@@ -251,6 +254,7 @@ async fn run_loop(
                     app.cell_px,
                     albums_inner.x,
                     albums_inner.y,
+                    app.in_tmux,
                 );
                 app.home_art_needs_redraw = false;
             }
@@ -289,13 +293,13 @@ async fn run_loop(
                     // last_rendered_art rect will no longer match the new
                     // art_rect, so the full render path is taken on next frame.
                     if app.kitty_supported && art_displayed {
-                        let _ = ui::kitty_art::clear_image();
+                        let _ = ui::kitty_art::clear_image(app.in_tmux);
                         art_displayed = false;
                         last_rendered_art = None;
                     }
                     // Clear art strip thumbnails on resize so they re-render at the new size.
                     if app.kitty_supported && app.active_tab == app::Tab::Home {
-                        let _ = ui::kitty_art::clear_art_strip();
+                        let _ = ui::kitty_art::clear_art_strip(app.in_tmux);
                     }
                 }
                 _ => {}
@@ -374,8 +378,8 @@ fn handle_home_click(x: u16, y: u16, app: &mut App, center: ratatui::layout::Rec
                 if app.home.album_selected_index == album_index {
                     // Second click on already-selected album: navigate to Browser.
                     if app.kitty_supported {
-                        let _ = crate::ui::kitty_art::clear_image();
-                        let _ = crate::ui::kitty_art::clear_art_strip();
+                        let _ = crate::ui::kitty_art::clear_image(app.in_tmux);
+                        let _ = crate::ui::kitty_art::clear_art_strip(app.in_tmux);
                     }
                     app.active_tab = app::Tab::Browser;
                     app.search_filter = None;
