@@ -35,6 +35,7 @@ use action::{Action, Direction};
 use app::{App, BrowserColumn, Tab};
 use config::Config;
 use keybinds::Keybinds;
+use state::PlaylistFocus;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -312,14 +313,26 @@ async fn run_loop(
                     // Only process key-press events; ignore release/repeat to avoid
                     // double-firing on terminals that send all event kinds (e.g. Kitty).
                     if key.kind == KeyEventKind::Press {
-                        let action = if app.help_visible {
-                            map_help_key(key.code, key.modifiers, &app.keybinds)
-                        } else if app.search_mode.active {
-                            map_search_key(key.code)
+                        if app.playlist_overlay.visible
+                            && app.active_tab == Tab::Browser
+                            && !app.help_visible
+                        {
+                            let action = map_playlist_key(
+                                key.code,
+                                key.modifiers,
+                                &app.playlist_overlay.focus,
+                            );
+                            app.handle_playlist_action(action);
                         } else {
-                            map_key(key.code, key.modifiers, app.active_tab, &app.keybinds)
-                        };
-                        app.dispatch(action);
+                            let action = if app.help_visible {
+                                map_help_key(key.code, key.modifiers, &app.keybinds)
+                            } else if app.search_mode.active {
+                                map_search_key(key.code)
+                            } else {
+                                map_key(key.code, key.modifiers, app.active_tab, &app.keybinds)
+                            };
+                            app.dispatch(action);
+                        }
                     }
                 }
                 Event::Mouse(mouse) => {
@@ -508,7 +521,51 @@ fn handle_home_click(x: u16, y: u16, app: &mut App, center: ratatui::layout::Rec
     }
 }
 
+/// Translate a key event into an `Action` when the playlist overlay is open.
+///
+/// Called instead of `map_key` whenever `playlist_overlay.visible` is true and
+/// the active tab is Browser.  Every key that is not handled here produces
+/// `Action::None`, so normal playback/volume keys are intentionally blocked
+/// while the overlay is in the foreground.
+fn map_playlist_key(code: KeyCode, modifiers: KeyModifiers, focus: &PlaylistFocus) -> Action {
+    let shift = modifiers.intersects(KeyModifiers::SHIFT);
+    match code {
+        KeyCode::Esc                               => Action::TogglePlaylistOverlay,
+        KeyCode::Char('k')                         => Action::PlaylistScrollUp,
+        KeyCode::Char('j')                         => Action::PlaylistScrollDown,
+        KeyCode::Char('h')                         => Action::PlaylistFocusList,
+        KeyCode::Char('l')                         => Action::PlaylistFocusTracks,
+        KeyCode::Up                                => Action::PlaylistScrollUp,
+        KeyCode::Down                              => Action::PlaylistScrollDown,
+        KeyCode::Enter => match focus {
+            PlaylistFocus::List   => Action::PlaylistPlayAll,
+            PlaylistFocus::Tracks => Action::PlaylistPlayTrack,
+        },
+        // Shift+A — uppercase A or lowercase a+SHIFT
+        KeyCode::Char('A') | KeyCode::Char('a') if code == KeyCode::Char('A') || shift => {
+            match focus {
+                PlaylistFocus::List   => Action::PlaylistAppendAll,
+                PlaylistFocus::Tracks => Action::PlaylistAppendTrack,
+            }
+        }
+        KeyCode::Char('>') => match focus {
+            PlaylistFocus::Tracks => Action::PlaylistAppendTrack,
+            PlaylistFocus::List   => Action::None,
+        },
+        _ => Action::None,
+    }
+}
+
 fn map_key(code: KeyCode, modifiers: KeyModifiers, active_tab: Tab, kb: &Keybinds) -> Action {
+    // ── Browser-tab-specific keys ─────────────────────────────────────────────
+    if active_tab == Tab::Browser {
+        // Shift+P — open/close the playlist overlay
+        let shift = modifiers.intersects(KeyModifiers::SHIFT);
+        if code == KeyCode::Char('P') || (code == KeyCode::Char('p') && shift) {
+            return Action::TogglePlaylistOverlay;
+        }
+    }
+
     // ── Home-tab-specific keys ────────────────────────────────────────────────
     if active_tab == Tab::Home {
         // J / Shift+j: move to next section.

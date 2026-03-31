@@ -124,6 +124,40 @@ impl QueueState {
     }
 }
 
+// ── PlaylistOverlay ───────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Default)]
+pub enum PlaylistFocus {
+    #[default]
+    List,
+    Tracks,
+}
+
+#[derive(Debug)]
+pub struct PlaylistOverlay {
+    pub visible: bool,
+    pub playlists: LoadingState<Vec<playterm_subsonic::Playlist>>,
+    pub selected_playlist_index: usize,
+    pub tracks: LoadingState<Vec<playterm_subsonic::Song>>,
+    pub selected_track_index: usize,
+    pub focus: PlaylistFocus,
+    pub loaded_playlist_id: Option<String>,
+}
+
+impl Default for PlaylistOverlay {
+    fn default() -> Self {
+        Self {
+            visible: false,
+            playlists: LoadingState::NotLoaded,
+            selected_playlist_index: 0,
+            tracks: LoadingState::NotLoaded,
+            selected_track_index: 0,
+            focus: PlaylistFocus::List,
+            loaded_playlist_id: None,
+        }
+    }
+}
+
 // ── PlaybackState ─────────────────────────────────────────────────────────────
 
 #[derive(Debug, Default)]

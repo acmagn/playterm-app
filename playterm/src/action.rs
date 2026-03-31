@@ -67,6 +67,24 @@ pub enum Action {
     HomeAlbumPlay,
     /// Append the selected album (strip) to queue without clearing.
     HomeAlbumAddToQueue,
+    /// Toggle the playlist browser overlay.
+    TogglePlaylistOverlay,
+    /// Scroll up within the playlist overlay (list or tracks pane).
+    PlaylistScrollUp,
+    /// Scroll down within the playlist overlay (list or tracks pane).
+    PlaylistScrollDown,
+    /// Move focus to the tracks pane of the playlist overlay.
+    PlaylistFocusTracks,
+    /// Move focus back to the playlist list pane of the overlay.
+    PlaylistFocusList,
+    /// Replace the queue with all tracks from the selected playlist and play.
+    PlaylistPlayAll,
+    /// Append all tracks from the selected playlist to the queue.
+    PlaylistAppendAll,
+    /// Replace the queue with the highlighted track and play.
+    PlaylistPlayTrack,
+    /// Append the highlighted track to the queue.
+    PlaylistAppendTrack,
     Quit,
     None,
 }

@@ -92,6 +92,31 @@ pub struct Album {
     pub song: Vec<Song>,
 }
 
+/// A playlist entry as returned by `getPlaylists`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Playlist {
+    pub id: String,
+    pub name: String,
+    pub song_count: Option<u32>,
+    pub duration: Option<u64>,
+    pub owner: Option<String>,
+    pub public: Option<bool>,
+}
+
+/// A playlist with its full track list as returned by `getPlaylist`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlaylistDetail {
+    pub id: String,
+    pub name: String,
+    pub song_count: Option<u32>,
+    pub duration: Option<u64>,
+    /// Track entries — the Subsonic API uses the key `entry` for these.
+    #[serde(default, rename = "entry")]
+    pub songs: Vec<Song>,
+}
+
 /// Combined search result from `search3`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct SearchResult3 {
@@ -209,4 +234,34 @@ pub(crate) struct SearchBody {
     pub search_result3: Option<SearchResult3>,
 }
 
+#[derive(Deserialize)]
+pub(crate) struct PlaylistsContainer {
+    #[serde(default)]
+    pub playlist: Vec<Playlist>,
+}
 
+#[derive(Deserialize)]
+pub(crate) struct PlaylistsEnvelope {
+    #[serde(rename = "subsonic-response")]
+    pub response: PlaylistsBody,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct PlaylistsBody {
+    pub status: String,
+    pub error: Option<SubsonicError>,
+    pub playlists: Option<PlaylistsContainer>,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct PlaylistEnvelope {
+    #[serde(rename = "subsonic-response")]
+    pub response: PlaylistBody,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct PlaylistBody {
+    pub status: String,
+    pub error: Option<SubsonicError>,
+    pub playlist: Option<PlaylistDetail>,
+}

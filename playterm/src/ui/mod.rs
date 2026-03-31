@@ -6,6 +6,7 @@ pub mod kitty_art;
 pub mod layout;
 pub mod now_playing;
 pub mod nowplaying_tab;
+pub mod playlist_overlay;
 pub mod popup;
 pub mod queue;
 pub mod status_bar;

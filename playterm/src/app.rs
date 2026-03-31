@@ -17,7 +17,7 @@ use crate::color::{extract_accent, lerp_color};
 use crate::config::Config;
 use crate::history::PlayRecord;
 use crate::keybinds::Keybinds;
-use crate::state::{LibraryState, LoadingState, PlaybackState, QueueState};
+use crate::state::{LibraryState, LoadingState, PlaybackState, PlaylistFocus, PlaylistOverlay, QueueState};
 use crate::theme::Theme;
 use playterm_subsonic::LyricLine;
 
@@ -194,6 +194,10 @@ pub enum LibraryUpdate {
     CacheTrack { song_id: String, album_id: String, bytes: Vec<u8> },
     /// Cover art fetched for a home-tab album strip thumbnail.
     HomeArt { album_id: String, bytes: Vec<u8> },
+    /// All playlists fetched from `getPlaylists`.
+    Playlists(Vec<playterm_subsonic::Playlist>),
+    /// Full track list for a single playlist fetched from `getPlaylist`.
+    PlaylistTracks { playlist_id: String, songs: Vec<playterm_subsonic::Song> },
 }
 
 // ── App ───────────────────────────────────────────────────────────────────────
@@ -295,6 +299,9 @@ pub struct App {
     /// name on the next render pass, then clear the field.
     pub pending_artist_select: Option<String>,
 
+    // ── Playlist overlay (Phase 8) ────────────────────────────────────────────
+    pub playlist_overlay: PlaylistOverlay,
+
     // ── Play history (Phase 6.1) ──────────────────────────────────────────────
     /// Persistent play history (loaded on startup, saved on quit).
     pub history: crate::history::PlayHistory,
@@ -363,6 +370,7 @@ impl App {
             home_art_last_tmux_render: None,
             home: HomeState::default(),
             pending_artist_select: None,
+            playlist_overlay: PlaylistOverlay::default(),
             history: crate::history::PlayHistory::default(),
             play_recorded: false,
             lyrics_visible,
@@ -824,6 +832,18 @@ impl App {
                     }
                 }
             }
+            LibraryUpdate::Playlists(playlists) => {
+                self.playlist_overlay.playlists = crate::state::LoadingState::Loaded(playlists);
+                self.playlist_overlay.selected_playlist_index = 0;
+            }
+            LibraryUpdate::PlaylistTracks { playlist_id, songs } => {
+                // Ignore stale results if the user navigated to a different playlist
+                // while this fetch was in flight.
+                if self.playlist_overlay.loaded_playlist_id.as_deref() == Some(&playlist_id) {
+                    self.playlist_overlay.tracks = LoadingState::Loaded(songs);
+                    self.playlist_overlay.selected_track_index = 0;
+                }
+            }
         }
     }
 
@@ -1072,6 +1092,7 @@ impl App {
             }
             Action::Quit => self.should_quit = true,
             Action::SwitchTab => {
+                self.playlist_overlay.visible = false;
                 if self.kitty_supported {
                     let _ = crate::ui::kitty_art::clear_image(self.in_tmux);
                     if self.active_tab == Tab::Home {
@@ -1086,6 +1107,7 @@ impl App {
                 }
             }
             Action::SwitchTabReverse => {
+                self.playlist_overlay.visible = false;
                 if self.kitty_supported {
                     let _ = crate::ui::kitty_art::clear_image(self.in_tmux);
                     if self.active_tab == Tab::Home {
@@ -1100,6 +1122,7 @@ impl App {
                 }
             }
             Action::GoToHome => {
+                self.playlist_overlay.visible = false;
                 if self.kitty_supported { let _ = crate::ui::kitty_art::clear_image(self.in_tmux); }
                 self.active_tab = Tab::Home;
                 self.search_filter = None;
@@ -1107,6 +1130,7 @@ impl App {
                 self.home_art_needs_redraw = true;
             }
             Action::GoToBrowser => {
+                self.playlist_overlay.visible = false;
                 if self.kitty_supported {
                     let _ = crate::ui::kitty_art::clear_image(self.in_tmux);
                     if self.active_tab == Tab::Home {
@@ -1118,6 +1142,7 @@ impl App {
                 self.apply_pending_artist_select();
             }
             Action::GoToNowPlaying => {
+                self.playlist_overlay.visible = false;
                 if self.kitty_supported {
                     let _ = crate::ui::kitty_art::clear_image(self.in_tmux);
                     if self.active_tab == Tab::Home {
@@ -1387,6 +1412,17 @@ impl App {
                     self.accent_target    = target;
                     self.accent_transition_start = Some(Instant::now());
                 }
+            }
+            Action::TogglePlaylistOverlay
+            | Action::PlaylistScrollUp
+            | Action::PlaylistScrollDown
+            | Action::PlaylistFocusTracks
+            | Action::PlaylistFocusList
+            | Action::PlaylistPlayAll
+            | Action::PlaylistAppendAll
+            | Action::PlaylistPlayTrack
+            | Action::PlaylistAppendTrack => {
+                self.handle_playlist_action(action);
             }
             Action::None => {}
         }
@@ -1953,6 +1989,166 @@ impl App {
         if idx < self.queue.songs.len() {
             self.queue.cursor = idx;
             self.queue.scroll = idx;
+        }
+    }
+
+    // ── Playlist overlay ──────────────────────────────────────────────────────
+
+    /// Spawn a background task to fetch all playlists from the server.
+    pub fn fetch_playlists(&self) {
+        let client = self.subsonic.clone();
+        let tx = self.library_tx.clone();
+        tokio::spawn(async move {
+            match client.get_playlists().await {
+                Ok(playlists) => {
+                    let _ = tx.send(LibraryUpdate::Playlists(playlists)).await;
+                }
+                Err(e) => eprintln!("playterm: get_playlists failed — {e}"),
+            }
+        });
+    }
+
+    /// Spawn a background task to fetch the track list for `playlist_id`.
+    pub fn fetch_playlist_tracks(&self, playlist_id: String) {
+        let client = self.subsonic.clone();
+        let tx = self.library_tx.clone();
+        tokio::spawn(async move {
+            match client.get_playlist(&playlist_id).await {
+                Ok(detail) => {
+                    let _ = tx
+                        .send(LibraryUpdate::PlaylistTracks {
+                            playlist_id,
+                            songs: detail.songs,
+                        })
+                        .await;
+                }
+                Err(e) => eprintln!("playterm: get_playlist({playlist_id}) failed — {e}"),
+            }
+        });
+    }
+
+    /// Handle an action directed at the playlist overlay.
+    ///
+    /// Called both from `dispatch()` (for `TogglePlaylistOverlay` when overlay is
+    /// closed) and directly from the event loop (for all keys when overlay is open).
+    pub fn handle_playlist_action(&mut self, action: Action) {
+        match action {
+            Action::TogglePlaylistOverlay => {
+                if self.playlist_overlay.visible {
+                    self.playlist_overlay.visible = false;
+                } else {
+                    self.playlist_overlay.visible = true;
+                    if matches!(self.playlist_overlay.playlists, LoadingState::NotLoaded) {
+                        self.playlist_overlay.playlists = LoadingState::Loading;
+                        self.fetch_playlists();
+                    }
+                }
+            }
+            Action::PlaylistScrollUp => match self.playlist_overlay.focus {
+                PlaylistFocus::List => {
+                    self.playlist_overlay.selected_playlist_index =
+                        self.playlist_overlay.selected_playlist_index.saturating_sub(1);
+                }
+                PlaylistFocus::Tracks => {
+                    self.playlist_overlay.selected_track_index =
+                        self.playlist_overlay.selected_track_index.saturating_sub(1);
+                }
+            },
+            Action::PlaylistScrollDown => match self.playlist_overlay.focus {
+                PlaylistFocus::List => {
+                    if let LoadingState::Loaded(ref playlists) = self.playlist_overlay.playlists {
+                        let max = playlists.len().saturating_sub(1);
+                        self.playlist_overlay.selected_playlist_index =
+                            (self.playlist_overlay.selected_playlist_index + 1).min(max);
+                    }
+                }
+                PlaylistFocus::Tracks => {
+                    if let LoadingState::Loaded(ref songs) = self.playlist_overlay.tracks {
+                        let max = songs.len().saturating_sub(1);
+                        self.playlist_overlay.selected_track_index =
+                            (self.playlist_overlay.selected_track_index + 1).min(max);
+                    }
+                }
+            },
+            Action::PlaylistFocusTracks => {
+                self.playlist_overlay.focus = PlaylistFocus::Tracks;
+                // Fetch tracks if not already loaded for the currently selected playlist.
+                if let LoadingState::Loaded(ref playlists) = self.playlist_overlay.playlists {
+                    if let Some(playlist) =
+                        playlists.get(self.playlist_overlay.selected_playlist_index)
+                    {
+                        let id = playlist.id.clone();
+                        if self.playlist_overlay.loaded_playlist_id.as_deref() != Some(&id) {
+                            self.playlist_overlay.tracks = LoadingState::Loading;
+                            self.playlist_overlay.loaded_playlist_id = Some(id.clone());
+                            self.fetch_playlist_tracks(id);
+                        }
+                    }
+                }
+            }
+            Action::PlaylistFocusList => {
+                self.playlist_overlay.focus = PlaylistFocus::List;
+            }
+            Action::PlaylistPlayAll => {
+                if let LoadingState::Loaded(ref songs) = self.playlist_overlay.tracks {
+                    let songs = songs.clone();
+                    self.queue.songs.clear();
+                    self.queue.cursor = 0;
+                    self.queue.pre_shuffle_order = None;
+                    for song in songs {
+                        self.queue.push(song);
+                    }
+                    if !self.queue.songs.is_empty() {
+                        self.queue.cursor = 0;
+                        self.play_current();
+                    }
+                }
+                self.playlist_overlay.visible = false;
+            }
+            Action::PlaylistAppendAll => {
+                if let LoadingState::Loaded(ref songs) = self.playlist_overlay.tracks {
+                    let was_empty = self.queue.songs.is_empty();
+                    for song in songs.clone() {
+                        self.queue.push(song);
+                    }
+                    if was_empty && !self.queue.songs.is_empty() {
+                        self.queue.cursor = 0;
+                        self.play_current();
+                    }
+                }
+                self.playlist_overlay.visible = false;
+            }
+            Action::PlaylistPlayTrack => {
+                if let LoadingState::Loaded(ref songs) = self.playlist_overlay.tracks {
+                    if let Some(song) =
+                        songs.get(self.playlist_overlay.selected_track_index).cloned()
+                    {
+                        self.queue.songs.clear();
+                        self.queue.cursor = 0;
+                        self.queue.pre_shuffle_order = None;
+                        self.queue.push(song);
+                        self.queue.cursor = 0;
+                        self.play_current();
+                    }
+                }
+                self.playlist_overlay.visible = false;
+            }
+            Action::PlaylistAppendTrack => {
+                if let LoadingState::Loaded(ref songs) = self.playlist_overlay.tracks {
+                    if let Some(song) =
+                        songs.get(self.playlist_overlay.selected_track_index).cloned()
+                    {
+                        let was_empty = self.queue.songs.is_empty();
+                        self.queue.push(song);
+                        if was_empty {
+                            self.queue.cursor = 0;
+                            self.play_current();
+                        }
+                    }
+                }
+                self.playlist_overlay.visible = false;
+            }
+            _ => {}
         }
     }
 }

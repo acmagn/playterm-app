@@ -22,7 +22,8 @@ use std::time::Duration;
 use crate::error::check_status;
 use crate::models::{
     Album, AlbumEnvelope, Artist, ArtistEnvelope, Artists, ArtistsEnvelope,
-    PingEnvelope, SearchEnvelope, SearchResult3, Song, SongEnvelope, SubsonicLibrary,
+    PingEnvelope, Playlist, PlaylistDetail, PlaylistEnvelope, PlaylistsEnvelope,
+    SearchEnvelope, SearchResult3, Song, SongEnvelope, SubsonicLibrary,
 };
 
 // ── Constants ──────────────────────────────────────────────────────────────────
@@ -278,6 +279,43 @@ impl SubsonicClient {
             .bytes()
             .await?;
         Ok(bytes.to_vec())
+    }
+
+    /// Fetch all playlists visible to the authenticated user (`getPlaylists`).
+    pub async fn get_playlists(&self) -> Result<Vec<Playlist>> {
+        let env: PlaylistsEnvelope = self
+            .http
+            .get(self.endpoint_url("getPlaylists"))
+            .query(&self.auth_params())
+            .send()
+            .await?
+            .json()
+            .await?;
+        let r = &env.response;
+        check_status(&r.status, r.error.as_ref())?;
+        Ok(r.playlists
+            .as_ref()
+            .map(|p| p.playlist.clone())
+            .unwrap_or_default())
+    }
+
+    /// Fetch a single playlist including its full track list by ID (`getPlaylist`).
+    pub async fn get_playlist(&self, id: &str) -> Result<PlaylistDetail> {
+        let mut params = self.auth_params();
+        params.push(("id", id.to_string()));
+        let env: PlaylistEnvelope = self
+            .http
+            .get(self.endpoint_url("getPlaylist"))
+            .query(&params)
+            .send()
+            .await?
+            .json()
+            .await?;
+        let r = &env.response;
+        check_status(&r.status, r.error.as_ref())?;
+        r.playlist
+            .clone()
+            .ok_or_else(|| anyhow!("missing 'playlist' field in getPlaylist response"))
     }
 
     /// Mark a song as played (scrobble).
