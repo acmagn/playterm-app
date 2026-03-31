@@ -110,10 +110,16 @@ async fn main() -> Result<()> {
     let mut stdout = io::stdout();
     stdout.execute(EnterAlternateScreen)?;
     stdout.execute(EnableMouseCapture)?;
-    // Enable focus-change reporting unconditionally so FocusGained can trigger
-    // an album-art redraw on both direct Ghostty usage and tmux pane switches
-    // (tmux also requires `focus-events on` in tmux.conf to forward these).
-    stdout.execute(EnableFocusChange)?;
+    // Enable focus-change reporting. Inside tmux the bare CSI sequence is
+    // swallowed by tmux itself; wrap it in a DCS passthrough so the outer
+    // terminal (Ghostty) receives it.  Outside tmux the crossterm helper is fine.
+    if app.in_tmux {
+        use std::io::Write;
+        stdout.write_all(b"\x1bPtmux;\x1b\x1b[?1004h\x1b\\")?;
+        stdout.flush()?;
+    } else {
+        stdout.execute(EnableFocusChange)?;
+    }
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -127,7 +133,13 @@ async fn main() -> Result<()> {
     // Restore terminal regardless of errors.
     disable_raw_mode()?;
     terminal.backend_mut().execute(DisableMouseCapture)?;
-    terminal.backend_mut().execute(DisableFocusChange)?;
+    if app.in_tmux {
+        use std::io::Write;
+        terminal.backend_mut().write_all(b"\x1bPtmux;\x1b\x1b[?1004l\x1b\\")?;
+        terminal.backend_mut().flush()?;
+    } else {
+        terminal.backend_mut().execute(DisableFocusChange)?;
+    }
     terminal.backend_mut().execute(LeaveAlternateScreen)?;
     terminal.show_cursor()?;
 
