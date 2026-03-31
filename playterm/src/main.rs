@@ -317,12 +317,36 @@ async fn run_loop(
                             && app.active_tab == Tab::Browser
                             && !app.help_visible
                         {
-                            let action = map_playlist_key(
+                            // Tab-switch and quit keys bypass the playlist handler
+                            // and route through normal dispatch unchanged.
+                            let is_tab_switch = matches!(
                                 key.code,
-                                key.modifiers,
-                                &app.playlist_overlay.focus,
+                                KeyCode::Tab
+                                | KeyCode::BackTab
+                                | KeyCode::Char('1')
+                                | KeyCode::Char('2')
+                                | KeyCode::Char('3')
                             );
-                            app.handle_playlist_action(action);
+                            let is_quit = app.keybinds.quit.matches(key.code, key.modifiers);
+                            if is_tab_switch || is_quit {
+                                if is_tab_switch {
+                                    app.playlist_overlay.visible = false;
+                                }
+                                let action = map_key(
+                                    key.code,
+                                    key.modifiers,
+                                    app.active_tab,
+                                    &app.keybinds,
+                                );
+                                app.dispatch(action);
+                            } else {
+                                let action = map_playlist_key(
+                                    key.code,
+                                    key.modifiers,
+                                    &app.playlist_overlay.focus,
+                                );
+                                app.handle_playlist_action(action);
+                            }
                         } else {
                             let action = if app.help_visible {
                                 map_help_key(key.code, key.modifiers, &app.keybinds)

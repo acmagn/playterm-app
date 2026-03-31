@@ -6,8 +6,8 @@
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
-use ratatui::widgets::{Block, BorderType, Borders, List, ListItem, ListState};
+use ratatui::style::{Color, Modifier, Style}; // Modifier used by highlight_style
+use ratatui::widgets::{Block, BorderType, Borders, Clear, List, ListItem, ListState};
 
 use crate::state::{LoadingState, PlaylistFocus, PlaylistOverlay};
 use crate::theme::Theme;
@@ -49,7 +49,7 @@ pub fn render_playlist_overlay(
         return;
     }
 
-    // ── Vertical split: top 60% dimmed, bottom 40% overlay ────────────────────
+    // ── Overlay occupies the bottom 40% of the browser content area ──────────
 
     let split = Layout::vertical([
         Constraint::Percentage(60),
@@ -57,21 +57,11 @@ pub fn render_playlist_overlay(
     ])
     .split(area);
 
-    let dim_area     = split[0];
     let overlay_area = split[1];
 
-    // Apply DIM modifier to every cell in the top region so the content behind
-    // the overlay appears subdued while the overlay is open.
-    {
-        let buf = frame.buffer_mut();
-        for y in dim_area.top()..dim_area.bottom() {
-            for x in dim_area.left()..dim_area.right() {
-                if let Some(cell) = buf.cell_mut((x, y)) {
-                    cell.set_style(Style::default().add_modifier(Modifier::DIM));
-                }
-            }
-        }
-    }
+    // Clear all cells in the overlay region before drawing so browser content
+    // beneath does not bleed through the Block widgets.
+    frame.render_widget(Clear, overlay_area);
 
     // ── Horizontal split: left 35% (playlists), right 65% (tracks) ───────────
 
@@ -107,7 +97,7 @@ fn render_playlist_list(
         .borders(Borders::ALL)
         .border_type(BorderType::Plain)
         .border_style(Style::default().fg(border_color))
-        .style(Style::default().bg(theme.surface));
+        .style(Style::default().bg(theme.background));
 
     let (items, sel) = match &overlay.playlists {
         LoadingState::NotLoaded => (vec![], None),
@@ -158,7 +148,7 @@ fn render_playlist_list(
                 .add_modifier(Modifier::BOLD),
         )
         .highlight_symbol("▶ ")
-        .style(Style::default().bg(theme.surface));
+        .style(Style::default().bg(theme.background));
 
     let mut state = ListState::default();
     state.select(sel);
@@ -193,7 +183,7 @@ fn render_track_list(
         .borders(Borders::ALL)
         .border_type(BorderType::Plain)
         .border_style(Style::default().fg(border_color))
-        .style(Style::default().bg(theme.surface));
+        .style(Style::default().bg(theme.background));
 
     let (items, sel) = match &overlay.tracks {
         LoadingState::NotLoaded => (
@@ -245,7 +235,7 @@ fn render_track_list(
                 .add_modifier(Modifier::BOLD),
         )
         .highlight_symbol("▶ ")
-        .style(Style::default().bg(theme.surface));
+        .style(Style::default().bg(theme.background));
 
     let mut state = ListState::default();
     state.select(sel);
