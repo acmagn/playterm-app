@@ -1089,6 +1089,10 @@ impl App {
             PlayerEvent::TrackEnded => {
                 if self.queue.next() {
                     self.play_current();
+                } else if !self.queue.songs.is_empty() {
+                    // End of queue — loop back to the first track.
+                    self.queue.cursor = 0;
+                    self.play_current();
                 } else {
                     self.playback.current_song = None;
                     self.playback.elapsed = std::time::Duration::ZERO;
