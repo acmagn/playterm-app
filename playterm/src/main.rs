@@ -110,11 +110,10 @@ async fn main() -> Result<()> {
     let mut stdout = io::stdout();
     stdout.execute(EnterAlternateScreen)?;
     stdout.execute(EnableMouseCapture)?;
-    // Enable focus-change reporting so we can clear Kitty images when the user
-    // switches to another tmux window/pane (requires `focus-events on` in tmux.conf).
-    if app.in_tmux {
-        stdout.execute(EnableFocusChange)?;
-    }
+    // Enable focus-change reporting unconditionally so FocusGained can trigger
+    // an album-art redraw on both direct Ghostty usage and tmux pane switches
+    // (tmux also requires `focus-events on` in tmux.conf to forward these).
+    stdout.execute(EnableFocusChange)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -128,9 +127,7 @@ async fn main() -> Result<()> {
     // Restore terminal regardless of errors.
     disable_raw_mode()?;
     terminal.backend_mut().execute(DisableMouseCapture)?;
-    if app.in_tmux {
-        terminal.backend_mut().execute(DisableFocusChange)?;
-    }
+    terminal.backend_mut().execute(DisableFocusChange)?;
     terminal.backend_mut().execute(LeaveAlternateScreen)?;
     terminal.show_cursor()?;
 
@@ -405,8 +402,12 @@ async fn run_loop(
                     }
                 }
                 Event::FocusGained => {
-                    if app.kitty_supported && app.in_tmux {
+                    if app.kitty_supported {
+                        // Force a full art re-transmit on the next frame — same
+                        // mechanism as tab return (last_rendered_art = None makes
+                        // stored_matches false, taking the re-encode path).
                         art_displayed = false;
+                        last_rendered_art = None;
                     }
                 }
                 _ => {}
