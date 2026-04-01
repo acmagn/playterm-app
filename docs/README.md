@@ -2,6 +2,8 @@
 
 A terminal music player for Subsonic-compatible servers. Built in Rust with [ratatui](https://github.com/ratatui/ratatui).
 
+**DISCLAIMER:** 100% coded by claude.
+
 Streams from [Navidrome](https://www.navidrome.org/), [Subsonic](https://www.subsonic.org/), or any server implementing the Subsonic API. Renders album art via the Kitty graphics protocol — including inside tmux.
 
 ---
@@ -26,20 +28,22 @@ Streams from [Navidrome](https://www.navidrome.org/), [Subsonic](https://www.sub
 
 ## Screenshots
 
+## Screenshots
+
 <p align="center">
-  <img src="docs/screenshots/Now Playing.png" width="49%" />
-  <img src="docs/screenshots/Home.png" width="49%" />
+  <img src="https://raw.githubusercontent.com/awriterandtheword-rgb/playterm-app/main/docs/screenshots/Now-Playing.png" width="49%" />
+  <img src="https://raw.githubusercontent.com/awriterandtheword-rgb/playterm-app/main/docs/screenshots/Home.png" width="49%" />
 </p>
 <p align="center">
-  <img src="docs/screenshots/Browse.png" width="49%" />
-  <img src="docs/screenshots/Lyrics.png" width="49%" />
+  <img src="https://raw.githubusercontent.com/awriterandtheword-rgb/playterm-app/main/docs/screenshots/Browse.png" width="49%" />
+  <img src="https://raw.githubusercontent.com/awriterandtheword-rgb/playterm-app/main/docs/screenshots/Lyrics.png" width="49%" />
 </p>
 <p align="center">
-  <img src="docs/screenshots/Visualizer.png" width="49%" />
-  <img src="docs/screenshots/Playlists.png" width="49%" />
+  <img src="https://raw.githubusercontent.com/awriterandtheword-rgb/playterm-app/main/docs/screenshots/Visualizer.png" width="49%" />
+  <img src="https://raw.githubusercontent.com/awriterandtheword-rgb/playterm-app/main/docs/screenshots/Playlists.png" width="49%" />
 </p>
 <p align="center">
-  <img src="docs/screenshots/Info.png" width="49%" />
+  <img src="https://raw.githubusercontent.com/awriterandtheword-rgb/playterm-app/main/docs/screenshots/Info.png" width="49%" />
 </p>
 
 ## Requirements
