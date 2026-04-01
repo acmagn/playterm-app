@@ -2,6 +2,12 @@
 name = "playterm"
 version = "0.1.0"
 edition = "2021"
+description = "A terminal music player for Subsonic-compatible servers"
+license = "MIT"
+repository = "https://github.com/awriterandtheword-rgb/playterm-app"
+readme = "docs/README.md"
+keywords = ["music", "tui", "subsonic", "navidrome", "terminal"]
+categories = ["command-line-utilities", "multimedia::audio"]
 
 [[bin]]
 name = "playterm"

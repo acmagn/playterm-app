@@ -2,6 +2,11 @@
 name = "playterm-subsonic"
 version = "0.1.0"
 edition = "2021"
+description = "Subsonic API client for playterm"
+license = "MIT"
+repository = "https://github.com/awriterandtheword-rgb/playterm-app"
+keywords = ["subsonic", "navidrome", "api", "music"]
+categories = ["multimedia::audio", "api-bindings"]
 
 [dependencies]
 anyhow = "1"
