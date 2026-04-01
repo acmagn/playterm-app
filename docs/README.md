@@ -51,6 +51,22 @@ Streams from [Navidrome](https://www.navidrome.org/), [Subsonic](https://www.sub
 
 ## Installation
 
+## Installation
+
+**Linux users** — install ALSA dev headers before building:
+```bash
+# Debian/Ubuntu
+sudo apt install libasound2-dev pkg-config
+
+# Fedora/RHEL
+sudo dnf install alsa-lib-devel pkg-config
+
+# Arch
+sudo pacman -S alsa-lib
+```
+
+# Install
+
 ```sh
 cargo install playterm
 ```
