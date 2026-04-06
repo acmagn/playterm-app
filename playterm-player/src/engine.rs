@@ -7,10 +7,14 @@
 //! - `PlayerEvent`  (engine → TUI): progress ticks, track-ended, errors.
 
 use std::collections::VecDeque;
+use std::io::Cursor;
 use std::sync::{Arc, Mutex, mpsc};
+use std::sync::OnceLock;
+use std::thread;
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
+use reqwest::header::ACCEPT_ENCODING;
 use rodio::{Decoder, DeviceSinkBuilder, Player};
 
 use crate::tap::SampleTap;
@@ -371,7 +375,53 @@ fn handle_command(
 
 // ── Stream + decode ───────────────────────────────────────────────────────────
 
-fn download_and_decode(url: &str) -> Result<Decoder<std::io::Cursor<Vec<u8>>>> {
+/// Shared client: default `get()` uses short timeouts and can truncate large or
+/// slow streams; long tracks need a generous read deadline and occasional retries.
+fn stream_http_client() -> &'static reqwest::blocking::Client {
+    static CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::blocking::Client::builder()
+            // Whole request including body (large lossless files over slow links).
+            .timeout(Duration::from_secs(900))
+            .connect_timeout(Duration::from_secs(60))
+            .pool_idle_timeout(Some(Duration::from_secs(90)))
+            .user_agent(concat!("playterm/", env!("CARGO_PKG_VERSION")))
+            .build()
+            .expect("stream HTTP client")
+    })
+}
+
+fn fetch_track_bytes(url: &str, accept_identity: bool) -> Result<Vec<u8>> {
+    let mut req = stream_http_client().get(url);
+    if accept_identity {
+        // Some proxies / servers serve odd combinations of Content-Encoding and
+        // body bytes; asking for identity avoids reqwest's decompress errors on
+        // those tracks while still returning raw audio.
+        req = req.header(ACCEPT_ENCODING, "identity");
+    }
+    let response = req.send().context("connecting to stream URL")?;
+    let status = response.status();
+    let response = response
+        .error_for_status()
+        .with_context(|| format!("stream HTTP {status}"))?;
+    let bytes = response
+        .bytes()
+        .context("reading stream body (connection dropped or truncated?)")?;
+    Ok(bytes.to_vec())
+}
+
+fn build_symphonia_decoder(bytes: Vec<u8>) -> Result<Decoder<Cursor<Vec<u8>>>> {
+    let byte_len = bytes.len() as u64;
+    let cursor = Cursor::new(bytes);
+    Decoder::builder()
+        .with_data(cursor)
+        .with_byte_len(byte_len)
+        .with_coarse_seek(true)
+        .build()
+        .context("decoding audio (unsupported or corrupt file?)")
+}
+
+fn download_and_decode(url: &str) -> Result<Decoder<Cursor<Vec<u8>>>> {
     // Download the full track into RAM so symphonia gets an unambiguously
     // seekable Cursor<Vec<u8>>.  StreamingReader over a BufReader was technically
     // seekable but symphonia's demuxer cached seekability as false during probe,
@@ -381,13 +431,17 @@ fn download_and_decode(url: &str) -> Result<Decoder<std::io::Cursor<Vec<u8>>>> {
     //   is_seekable = true internally.
     // with_coarse_seek: bypasses the time_base requirement for accurate seeking
     //   (unavailable on transcoded MP3 streams); seeks to the nearest keyframe.
-    let bytes = reqwest::blocking::get(url)?.bytes()?;
-    let byte_len = bytes.len() as u64;
-    let cursor = std::io::Cursor::new(bytes.to_vec());
-    let decoder = Decoder::builder()
-        .with_data(cursor)
-        .with_byte_len(byte_len)
-        .with_coarse_seek(true)
-        .build()?;
-    Ok(decoder)
+    let mut last_err: Option<anyhow::Error> = None;
+    for attempt in 0..4u32 {
+        if attempt > 0 {
+            thread::sleep(Duration::from_millis(200 * u64::from(attempt)));
+        }
+        // After a few normal tries (compressed transfer), ask for identity once.
+        let identity = attempt == 3;
+        match fetch_track_bytes(url, identity).and_then(build_symphonia_decoder) {
+            Ok(decoder) => return Ok(decoder),
+            Err(e) => last_err = Some(e),
+        }
+    }
+    Err(last_err.expect("loop runs at least once"))
 }
