@@ -204,6 +204,12 @@ playterm is a three-crate Cargo workspace: `playterm-subsonic` (API client), `pl
 
 ---
 
+## Roadmap
+
+Planned work is tracked as checklists in [MILESTONES.md](MILESTONES.md) (MPRIS, metadata cache + fzf, layout options, queue QOL).
+
+---
+
 ## Acknowledgements
 
 - [ratatui](https://github.com/ratatui/ratatui) — terminal UI framework
