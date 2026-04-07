@@ -266,8 +266,12 @@ pub enum LibraryUpdate {
     /// Playlist list fetched for the picker (separate from the overlay's list).
     PlaylistsForPicker(Vec<playterm_subsonic::Playlist>),
     /// Full library metadata index finished refreshing (background task).
+    /// Tuple:
+    /// - Vec<Song>: fresh index contents
+    /// - Option<String>: Navidrome `lastScan` token to persist when scan-skip is enabled.
+    /// - bool: whether this refresh was explicitly forced by the user (Ctrl+r).
     LibraryIndexRefreshComplete {
-        result: Result<Vec<playterm_subsonic::Song>, String>,
+        result: Result<(Vec<playterm_subsonic::Song>, Option<String>, bool), String>,
     },
 }
 
@@ -697,10 +701,44 @@ impl App {
         self.library_index_refresh_started = Some(Instant::now());
         let client = self.subsonic.clone();
         let tx = self.library_tx.clone();
+        let index_path = self.config.resolved_library_index_path();
+        let nav_skip = self.config.library_navidrome_skip_unchanged_scan;
+        let album_p = self.config.library_fetch_album_parallelism;
+        let artist_p = self.config.library_fetch_artist_parallelism;
         tokio::spawn(async move {
-            let result = playterm_subsonic::fetch_all_library_songs(&client)
-                .await
-                .map_err(|e| e.to_string());
+            let result: Result<(Vec<playterm_subsonic::Song>, Option<String>, bool), String> = async {
+                if nav_skip && !force {
+                    if let Some(file) = crate::library_index::load(&index_path) {
+                        if let Some(ref tok) = file.navidrome_last_scan {
+                            if let Ok(status) = client.get_scan_status().await {
+                                if !status.scanning {
+                                    if status.last_scan.as_deref() == Some(tok.as_str()) {
+                                        return Ok((file.tracks.clone(), Some(tok.clone()), false));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                let opts = playterm_subsonic::FetchLibraryOptions {
+                    album_parallelism: album_p,
+                    artist_parallelism: artist_p,
+                };
+                let tracks = playterm_subsonic::fetch_all_library_songs_with_options(&client, opts)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let scan_tok = if nav_skip {
+                    client
+                        .get_scan_status()
+                        .await
+                        .ok()
+                        .and_then(|s| s.last_scan)
+                } else {
+                    None
+                };
+                Ok((tracks, scan_tok, force))
+            }
+            .await;
             let _ = tx.send(LibraryUpdate::LibraryIndexRefreshComplete { result }).await;
         });
     }
@@ -1135,19 +1173,30 @@ impl App {
                     .map(|d| d.as_secs())
                     .unwrap_or(0);
                 match result {
-                    Ok(tracks) => {
+                    Ok((tracks, navidrome_last_scan, forced)) => {
                         let path = self.config.resolved_library_index_path();
-                        if let Err(e) = crate::library_index::save(&path, &tracks, now) {
+                        let scan_save = navidrome_last_scan.as_deref();
+                        if let Err(e) =
+                            crate::library_index::save(&path, &tracks, now, scan_save)
+                        {
                             eprintln!("library index save: {e}");
                         }
                         self.library_index_refreshed_at = Some(now);
                         self.library_index_tracks = tracks;
                         self.library_index_by_id =
                             crate::library_index::index_by_id(&self.library_index_tracks);
+                        let msg = if forced {
+                            "Library index refresh complete"
+                        } else {
+                            "Library index updated"
+                        };
                         self.status_flash = Some((
-                            "Library index updated".into(),
+                            msg.into(),
                             Instant::now() + Duration::from_secs(2),
                         ));
+                        if forced && self.config.library_notify_on_forced_index_refresh {
+                            crate::desktop_notify::spawn_forced_library_index_complete();
+                        }
                     }
                     Err(e) => {
                         eprintln!("library index refresh: {e}");

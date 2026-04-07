@@ -21,14 +21,23 @@ pub struct LibraryIndexFile {
     /// Unix seconds when this index was last fully refreshed from the server.
     pub refreshed_at_unix: u64,
     pub tracks: Vec<Song>,
+    /// Navidrome: `getScanStatus.lastScan` after the last full walk (RFC3339). Used to skip
+    /// redundant refreshes when `[library] navidrome_skip_unchanged_scan` is enabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub navidrome_last_scan: Option<String>,
 }
 
 impl LibraryIndexFile {
-    pub fn new(tracks: Vec<Song>, refreshed_at_unix: u64) -> Self {
+    pub fn new(
+        tracks: Vec<Song>,
+        refreshed_at_unix: u64,
+        navidrome_last_scan: Option<String>,
+    ) -> Self {
         Self {
             version: FORMAT_VERSION,
             refreshed_at_unix,
             tracks,
+            navidrome_last_scan,
         }
     }
 }
@@ -54,12 +63,21 @@ pub fn load(path: &Path) -> Option<LibraryIndexFile> {
 }
 
 /// Atomically write the index (temp + rename).
-pub fn save(path: &Path, tracks: &[Song], refreshed_at_unix: u64) -> Result<()> {
+pub fn save(
+    path: &Path,
+    tracks: &[Song],
+    refreshed_at_unix: u64,
+    navidrome_last_scan: Option<&str>,
+) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("creating {}", parent.display()))?;
     }
-    let file = LibraryIndexFile::new(tracks.to_vec(), refreshed_at_unix);
+    let file = LibraryIndexFile::new(
+        tracks.to_vec(),
+        refreshed_at_unix,
+        navidrome_last_scan.map(String::from),
+    );
     let json = serde_json::to_string_pretty(&file).context("serialize library index")?;
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::SystemTime::UNIX_EPOCH)

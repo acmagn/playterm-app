@@ -6,6 +6,7 @@ mod library_index;
 mod mpris;
 mod color;
 mod config;
+mod desktop_notify;
 mod history;
 mod keybinds;
 mod lyrics;

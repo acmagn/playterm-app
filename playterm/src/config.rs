@@ -109,9 +109,35 @@ pub struct LibrarySection {
     /// Extra arguments passed to fzf after defaults (delimiter, columns).
     #[serde(default = "default_fzf_args")]
     pub fzf_args: Vec<String>,
+    /// Concurrent `getAlbum` calls per artist during a full index refresh. Default: 12.
+    #[serde(default = "default_library_fetch_album_parallelism")]
+    pub fetch_album_parallelism: usize,
+    /// Concurrent artists during a full index refresh. Default: 4.
+    #[serde(default = "default_library_fetch_artist_parallelism")]
+    pub fetch_artist_parallelism: usize,
+    /// Navidrome only: if the on-disk index was built after the same library scan as
+    /// `getScanStatus.lastScan`, skip the full API walk (still obeys Ctrl+r force refresh).
+    #[serde(default)]
+    pub navidrome_skip_unchanged_scan: bool,
+    /// After a forced index refresh (Ctrl+r), send a desktop notification (FreeDesktop
+    /// `notify-send` protocol). Default: true.
+    #[serde(default = "default_library_notify_on_forced_refresh")]
+    pub notify_on_forced_index_refresh: bool,
 }
 
 fn default_library_enabled() -> bool {
+    true
+}
+
+fn default_library_fetch_album_parallelism() -> usize {
+    12
+}
+
+fn default_library_fetch_artist_parallelism() -> usize {
+    4
+}
+
+fn default_library_notify_on_forced_refresh() -> bool {
     true
 }
 
@@ -146,6 +172,10 @@ impl Default for LibrarySection {
             max_age_secs: default_library_max_age_secs(),
             fzf_binary: default_fzf_binary(),
             fzf_args: default_fzf_args(),
+            fetch_album_parallelism: default_library_fetch_album_parallelism(),
+            fetch_artist_parallelism: default_library_fetch_artist_parallelism(),
+            navidrome_skip_unchanged_scan: false,
+            notify_on_forced_index_refresh: default_library_notify_on_forced_refresh(),
         }
     }
 }
@@ -237,6 +267,11 @@ pub struct Config {
     pub library_index_max_age_secs: u64,
     pub fzf_binary: String,
     pub fzf_args: Vec<String>,
+    pub library_fetch_album_parallelism: usize,
+    pub library_fetch_artist_parallelism: usize,
+    pub library_navidrome_skip_unchanged_scan: bool,
+    /// Desktop notification after a forced library index refresh finishes.
+    pub library_notify_on_forced_index_refresh: bool,
 }
 
 impl Config {
@@ -285,6 +320,10 @@ impl Config {
             library_index_max_age_secs: file_cfg.library.max_age_secs,
             fzf_binary:            file_cfg.library.fzf_binary,
             fzf_args:              file_cfg.library.fzf_args,
+            library_fetch_album_parallelism: file_cfg.library.fetch_album_parallelism.max(1),
+            library_fetch_artist_parallelism: file_cfg.library.fetch_artist_parallelism.max(1),
+            library_navidrome_skip_unchanged_scan: file_cfg.library.navidrome_skip_unchanged_scan,
+            library_notify_on_forced_index_refresh: file_cfg.library.notify_on_forced_index_refresh,
         })
     }
 
@@ -376,6 +415,10 @@ lyrics = false   # show lyrics overlay on NowPlaying tab (toggle with L)
 # fzf_binary = "fzf"       # or "sk"
 # fzf_args = ["--delimiter=\\t", "--with-nth=2,3,4,5", "--nth=1,2,3", "--multi", "--expect=ctrl-r", "--border=rounded"]
 # aligned --header is added automatically unless you pass your own --header=…
+# fetch_album_parallelism = 12    # concurrent getAlbum per artist during index refresh
+# fetch_artist_parallelism = 4    # concurrent artists during index refresh
+# navidrome_skip_unchanged_scan = false   # Navidrome: skip full walk when lastScan unchanged
+# notify_on_forced_index_refresh = true   # desktop notification when Ctrl+r refresh finishes
 
 [cache]
 enabled     = true
