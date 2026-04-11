@@ -10,7 +10,7 @@ use super::visualizer::render_visualizer;
 
 use crate::app::App;
 
-pub fn render(app: &App, frame: &mut Frame, area: Rect) {
+pub fn render(app: &mut App, frame: &mut Frame, area: Rect) {
     let boxed = app
         .config
         .now_playing_layout

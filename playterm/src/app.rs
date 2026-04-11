@@ -18,7 +18,10 @@ use crate::color::{extract_accent, lerp_color};
 use crate::config::Config;
 use crate::history::PlayRecord;
 use crate::keybinds::Keybinds;
-use crate::state::{ConfirmAction, LibraryState, LoadingState, PlaybackState, PlaylistFocus, PlaylistInputMode, PlaylistOverlay, QueueState};
+use crate::state::{
+    ConfirmAction, GlobalConfirm, LibraryState, LoadingState, PlaybackState, PlaylistFocus,
+    PlaylistInputMode, PlaylistOverlay, QueueState,
+};
 use crate::theme::Theme;
 use playterm_subsonic::LyricLine;
 
@@ -240,6 +243,8 @@ pub enum LibraryUpdate {
     AllTracksForArtist {
         songs: Vec<playterm_subsonic::Song>,
         start_playing: bool,
+        /// When true, insert all songs at the front of the queue (album / track order preserved).
+        prepend: bool,
     },
     /// Raw image bytes for a cover art ID fetched from Navidrome.
     CoverArt { cover_id: String, bytes: Vec<u8> },
@@ -249,6 +254,8 @@ pub enum LibraryUpdate {
     CacheTrack { song_id: String, album_id: String, bytes: Vec<u8> },
     /// Cover art fetched for a home-tab album strip thumbnail.
     HomeArt { album_id: String, bytes: Vec<u8> },
+    /// Home strip cover fetch failed — release loading slot so more fetches can run.
+    HomeArtFetchFailed { album_id: String },
     /// All playlists fetched from `getPlaylists`.
     Playlists(Vec<playterm_subsonic::Playlist>),
     /// Full track list for a single playlist fetched from `getPlaylist`.
@@ -269,10 +276,18 @@ pub enum LibraryUpdate {
     /// Tuple:
     /// - Vec<Song>: fresh index contents
     /// - Option<String>: Navidrome `lastScan` token to persist when scan-skip is enabled.
-    /// - bool: whether this refresh was explicitly forced by the user (Ctrl+r).
+    /// - bool: whether this refresh was explicitly forced by the user (e.g. Ctrl+g).
     LibraryIndexRefreshComplete {
         result: Result<(Vec<playterm_subsonic::Song>, Option<String>, bool), String>,
     },
+}
+
+#[derive(Clone, Copy)]
+enum AddAllMode {
+    Append,
+    ReplaceAlbum,
+    ReplaceArtist,
+    Prepend,
 }
 
 // ── PlaylistPicker ────────────────────────────────────────────────────────────
@@ -332,6 +347,8 @@ pub struct App {
     pub home_art_cache: HashMap<String, Vec<u8>>,
     /// Album IDs for which a home art fetch is currently in flight.
     pub home_art_loading: HashSet<String>,
+    /// Reused resize+zlib for Home strip Kitty thumbnails (avoids re-decoding on every redraw).
+    pub home_strip_thumb_prepared: HashMap<String, crate::ui::kitty_art::StripThumbPrepared>,
     /// Resolved keybindings (parsed from config.toml [keybinds]).
     pub keybinds: Keybinds,
     /// Resolved theme colours (parsed from config.toml [theme]).
@@ -407,6 +424,17 @@ pub struct App {
     /// the message should be cleared (`Instant::now() >= deadline`).
     pub status_flash: Option<(String, Instant)>,
 
+    /// Last measured height (inner rows) of the queue list; used when clamping scroll outside render.
+    pub queue_viewport_rows: usize,
+    /// Last measured inner height of each Browse column list (page up/down).
+    pub browser_list_viewport_rows: usize,
+    /// Saw a lone `g`; next `g` dispatches go-to-top (vim-style `gg`).
+    pub pending_gg: bool,
+    /// Confirmation prompt for expensive actions (e.g. full library index refresh).
+    pub pending_global_confirm: Option<GlobalConfirm>,
+    /// First visible line index inside the help popup (scroll).
+    pub help_scroll: usize,
+
     // ── Play history (Phase 6.1) ──────────────────────────────────────────────
     /// Persistent play history (loaded on startup, saved on quit).
     pub history: crate::history::PlayHistory,
@@ -477,6 +505,7 @@ impl App {
             art_cache: None,
             home_art_cache: HashMap::new(),
             home_art_loading: HashSet::new(),
+            home_strip_thumb_prepared: HashMap::new(),
             keybinds,
             theme,
             play_gen: 0,
@@ -495,6 +524,11 @@ impl App {
             playlist_overlay: PlaylistOverlay::default(),
             playlist_picker: None,
             status_flash: None,
+            queue_viewport_rows: 12,
+            browser_list_viewport_rows: 12,
+            pending_gg: false,
+            pending_global_confirm: None,
+            help_scroll: 0,
             history: crate::history::PlayHistory::default(),
             play_recorded: false,
             lyrics_visible,
@@ -585,6 +619,13 @@ impl App {
     /// Populate `self.home` from play history.  Called on every entry to the
     /// Home tab (GoToHome, SwitchTab landing, SwitchTabReverse landing).
     pub fn refresh_home_data(&mut self) {
+        let old_album_ids: Vec<String> = self
+            .home
+            .recent_albums
+            .iter()
+            .map(|a| a.album_id.clone())
+            .collect();
+
         // Recent albums: up to 20 unique albums for the art strip.
         self.home.recent_albums = self.history.recent_albums(20)
             .into_iter()
@@ -594,8 +635,32 @@ impl App {
                 artist_name,
             })
             .collect();
-        self.home.album_scroll_offset = 0;
-        self.home.album_selected_index = 0;
+
+        let new_album_ids: Vec<String> = self
+            .home
+            .recent_albums
+            .iter()
+            .map(|a| a.album_id.clone())
+            .collect();
+
+        let album_strip_unchanged = old_album_ids == new_album_ids;
+        if album_strip_unchanged {
+            // Same albums in the same order — keep scroll/selection and the Kitty
+            // strip CPU cache (`home_strip_thumb_prepared`). Tab switches still clear
+            // terminal placements, but redraw reuses zlib without re-decoding covers.
+            let max_idx = self.home.recent_albums.len().saturating_sub(1);
+            self.home.album_scroll_offset = self.home.album_scroll_offset.min(max_idx);
+            self.home.album_selected_index = self.home.album_selected_index.min(max_idx);
+        } else {
+            self.home.album_scroll_offset = 0;
+            self.home.album_selected_index = 0;
+        }
+
+        // Drop prepared thumbs for albums no longer in the strip (never blanket-clear:
+        // that forced a full decode pipeline on every Home visit).
+        let keep_ids: HashSet<String> =
+            self.home.recent_albums.iter().map(|a| a.album_id.clone()).collect();
+        self.home_strip_thumb_prepared.retain(|id, _| keep_ids.contains(id));
 
         // Recent tracks: last 15 from history (most recent first).
         let total = self.history.records.len();
@@ -614,23 +679,53 @@ impl App {
             };
         self.home.rediscover = self.history.rediscover_artists(15, &library_artist_pairs);
 
-        // Reset cursor / section.
-        self.home.selected_index = 0;
-        self.home.active_section = HomeSection::RecentAlbums;
+        if !album_strip_unchanged {
+            self.home.selected_index = 0;
+            self.home.active_section = HomeSection::RecentAlbums;
+        } else {
+            // Lists from history may have changed length while section stayed the same.
+            match self.home.active_section {
+                HomeSection::RecentTracks => {
+                    if self.home.recent_tracks.is_empty() {
+                        self.home.selected_index = 0;
+                    } else {
+                        let m = self.home.recent_tracks.len() - 1;
+                        self.home.selected_index = self.home.selected_index.min(m);
+                    }
+                }
+                HomeSection::Rediscover => {
+                    if self.home.rediscover.is_empty() {
+                        self.home.selected_index = 0;
+                    } else {
+                        let m = self.home.rediscover.len() - 1;
+                        self.home.selected_index = self.home.selected_index.min(m);
+                    }
+                }
+                HomeSection::TopArtists => {
+                    if self.home.top_artists.is_empty() {
+                        self.home.selected_index = 0;
+                    } else {
+                        let m = self.home.top_artists.len() - 1;
+                        self.home.selected_index = self.home.selected_index.min(m);
+                    }
+                }
+                HomeSection::RecentAlbums => {}
+            }
+        }
 
         // Kick off art fetches for any album not yet cached.
-        // Limit to 3 concurrent in-flight fetches to avoid overwhelming the connection.
         self.spawn_pending_home_art_fetches();
     }
 
     /// Spawn home art fetch tasks for albums not yet cached or loading,
-    /// up to a maximum of 3 concurrent in-flight fetches.
+    /// up to a maximum of concurrent in-flight fetches (see `MAX_CONCURRENT` below).
     fn spawn_pending_home_art_fetches(&mut self) {
-        const MAX_CONCURRENT: usize = 3;
+        const MAX_CONCURRENT: usize = 8;
         let album_ids: Vec<String> = self.home.recent_albums
             .iter()
             .map(|a| a.album_id.clone())
             .collect();
+        let max_px = self.config.home_cover_fetch_max_px;
         for album_id in album_ids {
             if self.home_art_loading.len() >= MAX_CONCURRENT {
                 break;
@@ -645,11 +740,21 @@ impl App {
             let client = self.subsonic.clone();
             let tx = self.library_tx.clone();
             tokio::spawn(async move {
-                match client.get_cover_art(&album_id).await {
+                let res = if max_px > 0 {
+                    client.get_cover_art_sized(&album_id, max_px).await
+                } else {
+                    client.get_cover_art(&album_id).await
+                };
+                match res {
                     Ok(bytes) => {
                         let _ = tx.send(LibraryUpdate::HomeArt { album_id, bytes }).await;
                     }
-                    Err(e) => eprintln!("home art fetch({album_id}): {e}"),
+                    Err(e) => {
+                        eprintln!("home art fetch({album_id}): {e}");
+                        let _ = tx
+                            .send(LibraryUpdate::HomeArtFetchFailed { album_id })
+                            .await;
+                    }
                 }
             });
         }
@@ -890,7 +995,11 @@ impl App {
                     let mut songs = album.song;
                     songs.sort_by_key(|s| (s.disc_number.unwrap_or(1), s.track.unwrap_or(0)));
                     let _ = tx
-                        .send(LibraryUpdate::AllTracksForArtist { songs, start_playing: true })
+                        .send(LibraryUpdate::AllTracksForArtist {
+                            songs,
+                            start_playing: true,
+                            prepend: false,
+                        })
                         .await;
                 }
                 Err(e) => eprintln!("fetch_and_replace_queue_with_album({album_id}): {e}"),
@@ -908,7 +1017,11 @@ impl App {
                     let mut songs = album.song;
                     songs.sort_by_key(|s| (s.disc_number.unwrap_or(1), s.track.unwrap_or(0)));
                     let _ = tx
-                        .send(LibraryUpdate::AllTracksForArtist { songs, start_playing: false })
+                        .send(LibraryUpdate::AllTracksForArtist {
+                            songs,
+                            start_playing: false,
+                            prepend: false,
+                        })
                         .await;
                 }
                 Err(e) => eprintln!("fetch_and_append_album_to_queue({album_id}): {e}"),
@@ -918,27 +1031,42 @@ impl App {
 
     /// Spawn a task that fetches every album + every track for the given artist,
     /// then delivers them as a flat sorted `AllTracksForArtist` update.
-    pub fn fetch_all_tracks_for_artist(&self, artist_id: String, start_playing: bool) {
+    pub fn fetch_all_tracks_for_artist(&self, artist_id: String, start_playing: bool, prepend: bool) {
         let client = self.subsonic.clone();
         let tx = self.library_tx.clone();
         tokio::spawn(async move {
-            let artist = match client.get_artist(&artist_id).await {
+            let mut artist = match client.get_artist(&artist_id).await {
                 Ok(a) => a,
                 Err(e) => {
                     eprintln!("fetch_all_tracks_for_artist({}): {e}", artist_id);
                     return;
                 }
             };
+            artist.album.sort_by(|a, b| {
+                match (a.year, b.year) {
+                    (Some(ya), Some(yb)) => ya.cmp(&yb).then_with(|| a.name.cmp(&b.name)),
+                    (Some(_), None) => std::cmp::Ordering::Less,
+                    (None, Some(_)) => std::cmp::Ordering::Greater,
+                    (None, None) => a.name.cmp(&b.name),
+                }
+            });
             let mut songs = Vec::new();
             for album in &artist.album {
                 match client.get_album(&album.id).await {
-                    Ok(a) => songs.extend(a.song),
+                    Ok(a) => {
+                        let mut s = a.song;
+                        s.sort_by_key(|t| (t.disc_number.unwrap_or(1), t.track.unwrap_or(0)));
+                        songs.extend(s);
+                    }
                     Err(e) => eprintln!("get_album({}): {e}", album.id),
                 }
             }
-            songs.sort_by_key(|s| (s.disc_number.unwrap_or(1), s.track.unwrap_or(0)));
             let _ = tx
-                .send(LibraryUpdate::AllTracksForArtist { songs, start_playing })
+                .send(LibraryUpdate::AllTracksForArtist {
+                    songs,
+                    start_playing,
+                    prepend,
+                })
                 .await;
         });
     }
@@ -1042,15 +1170,26 @@ impl App {
                 };
                 self.library.tracks.insert(album_id, loaded);
             }
-            LibraryUpdate::AllTracksForArtist { mut songs, start_playing } => {
+            LibraryUpdate::AllTracksForArtist {
+                mut songs,
+                start_playing,
+                prepend,
+            } => {
                 let was_empty = self.queue.songs.is_empty();
-                songs.sort_by_key(|s| (
-                    s.album_id.clone().unwrap_or_default(),
-                    s.disc_number.unwrap_or(1),
-                    s.track.unwrap_or(0),
-                ));
-                for song in songs {
-                    self.queue.push(song);
+                songs.sort_by_key(|s| {
+                    (
+                        s.year.unwrap_or(0),
+                        s.album_id.clone().unwrap_or_default(),
+                        s.disc_number.unwrap_or(1),
+                        s.track.unwrap_or(0),
+                    )
+                });
+                if prepend {
+                    self.queue.prepend_songs(songs);
+                } else {
+                    for song in songs {
+                        self.queue.push(song);
+                    }
                 }
                 if start_playing && was_empty && !self.queue.songs.is_empty() {
                     self.queue.cursor = 0;
@@ -1076,28 +1215,30 @@ impl App {
             }
             LibraryUpdate::HomeArt { album_id, bytes } => {
                 self.home_art_loading.remove(&album_id);
+                self.home_strip_thumb_prepared.remove(&album_id);
                 self.home_art_cache.insert(album_id, bytes);
                 // A fetch slot opened up — check if more albums need fetching.
                 self.spawn_pending_home_art_fetches();
-                // Signal main loop to re-render the art strip now that a new
-                // thumbnail is available in the cache.
                 if self.active_tab == Tab::Home {
                     if self.in_tmux {
-                        // In tmux mode, re-transmitting the full strip for every
-                        // individual image arrival causes visible blinking.  Only
-                        // trigger a render when all pending fetches are done, or
-                        // when 500 ms have passed since the last render (fallback
-                        // so partially-loaded strips still appear promptly).
-                        let elapsed = self.home_art_last_tmux_render
+                        // tmux: full strip re-transmit blinks; batch until idle or 500 ms fallback.
+                        let elapsed = self
+                            .home_art_last_tmux_render
                             .map(|t| t.elapsed().as_millis())
                             .unwrap_or(u128::MAX);
                         if self.home_art_loading.is_empty() || elapsed >= 500 {
                             self.home_art_needs_redraw = true;
                         }
                     } else {
+                        // Outside tmux: redraw each arrival — decode/zlib is cached in
+                        // `home_strip_thumb_prepared` so this is mostly base64 + Kitty I/O.
                         self.home_art_needs_redraw = true;
                     }
                 }
+            }
+            LibraryUpdate::HomeArtFetchFailed { album_id } => {
+                self.home_art_loading.remove(&album_id);
+                self.spawn_pending_home_art_fetches();
             }
             LibraryUpdate::Playlists(playlists) => {
                 self.playlist_overlay.playlists = crate::state::LoadingState::Loaded(playlists);
@@ -1450,6 +1591,7 @@ impl App {
         if matches!(
             action,
             SearchStart | SearchInput(_) | SearchBackspace | SearchConfirm | SearchCancel
+                | HelpScrollUp | HelpScrollDown
         ) {
             return;
         }
@@ -1625,8 +1767,12 @@ impl App {
         let mpris_action_hook = action.clone();
         match action {
             Action::ToggleHelp => {
+                self.pending_gg = false;
                 let was_visible = self.help_visible;
                 self.help_visible = !self.help_visible;
+                if !was_visible && self.help_visible {
+                    self.help_scroll = 0;
+                }
                 if self.kitty_supported && self.active_tab == Tab::Home {
                     if !was_visible {
                         // Opening popup on Home tab — clear art strip so it doesn't
@@ -1638,7 +1784,31 @@ impl App {
                     }
                 }
             }
-            Action::LibraryIndexRefresh => self.spawn_library_index_refresh(true),
+            Action::HelpScrollUp => {
+                self.help_scroll = self.help_scroll.saturating_sub(1);
+            }
+            Action::HelpScrollDown => {
+                self.help_scroll = self.help_scroll.saturating_add(1);
+            }
+            Action::LibraryIndexRefresh => {
+                if self.pending_global_confirm.is_some() {
+                    self.flash_status("Already confirming — press y or n");
+                } else {
+                    self.pending_global_confirm = Some(GlobalConfirm::LibraryIndexRefresh);
+                    self.flash_status_secs("Full library index refresh? (y/n)", 12);
+                }
+            }
+            Action::ConfirmLibraryIndexRefresh => {
+                if self.pending_global_confirm == Some(GlobalConfirm::LibraryIndexRefresh) {
+                    self.pending_global_confirm = None;
+                    self.spawn_library_index_refresh(true);
+                }
+            }
+            Action::CancelGlobalConfirm => {
+                if self.pending_global_confirm.take().is_some() {
+                    self.flash_status("Cancelled");
+                }
+            }
             Action::LibraryFzfPicker => {}
             Action::Quit => self.should_quit = true,
             Action::SwitchTab => {
@@ -1723,6 +1893,12 @@ impl App {
                         Direction::Down | Direction::Bottom => {
                             self.lyrics_scroll = self.lyrics_scroll.saturating_add(1);
                         }
+                        Direction::PageUp => {
+                            self.lyrics_scroll = self.lyrics_scroll.saturating_sub(16);
+                        }
+                        Direction::PageDown => {
+                            self.lyrics_scroll = self.lyrics_scroll.saturating_add(16);
+                        }
                     }
                 } else {
                     self.handle_navigate(dir);
@@ -1731,7 +1907,10 @@ impl App {
             Action::Select => self.handle_select(),
             Action::Back => self.handle_focus_left(),
             Action::AddToQueue => self.handle_add_to_queue(),
-            Action::AddAllToQueue => self.handle_add_all_to_queue(),
+            Action::AddAllToQueue => self.handle_add_all_to_queue(AddAllMode::Append),
+            Action::AddAllToQueueReplaceAlbum => self.handle_add_all_to_queue(AddAllMode::ReplaceAlbum),
+            Action::AddAllToQueueReplaceArtist => self.handle_add_all_to_queue(AddAllMode::ReplaceArtist),
+            Action::AddAllToQueuePrepend => self.handle_add_all_to_queue(AddAllMode::Prepend),
             Action::PlayPause => {
                 if !self.playback.player_loaded && self.queue.current().is_some() {
                     // Restored queue: engine has no track yet — load and start playing.
@@ -1789,6 +1968,7 @@ impl App {
                 self.playback.elapsed = new_pos;
             }
             Action::SearchStart => {
+                self.pending_gg = false;
                 self.search_mode.active = true;
                 self.search_mode.query.clear();
                 self.search_mode.selected = 0;
@@ -1821,6 +2001,7 @@ impl App {
                 }
             }
             Action::SearchCancel => {
+                self.pending_gg = false;
                 self.search_mode.active = false;
                 self.search_mode.query.clear();
                 self.search_mode.selected = 0;
@@ -2088,6 +2269,7 @@ impl App {
                     self.home.active_section = self.home.active_section.prev();
                     self.home.selected_index = 0;
                 }
+                Direction::PageUp | Direction::PageDown => {}
             }
             return;
         }
@@ -2098,9 +2280,12 @@ impl App {
             HomeSection::Rediscover  => self.home.rediscover.len(),
         };
         if section_len == 0 { return; }
+        const HOME_PAGE: usize = 8;
         self.home.selected_index = match dir {
             Direction::Up | Direction::Top    => self.home.selected_index.saturating_sub(1),
             Direction::Down | Direction::Bottom => (self.home.selected_index + 1).min(section_len - 1),
+            Direction::PageUp => self.home.selected_index.saturating_sub(HOME_PAGE),
+            Direction::PageDown => (self.home.selected_index + HOME_PAGE).min(section_len - 1),
         };
     }
 
@@ -2121,11 +2306,14 @@ impl App {
                     let cur_pos = self.library.selected_artist
                         .and_then(|sel| indices.iter().position(|&i| i == sel))
                         .unwrap_or(0);
+                    let page = self.browser_list_viewport_rows.max(1);
                     let new_pos = match dir {
                         Direction::Up => cur_pos.saturating_sub(1),
                         Direction::Down => (cur_pos + 1).min(indices.len() - 1),
                         Direction::Top => 0,
                         Direction::Bottom => indices.len() - 1,
+                        Direction::PageUp => cur_pos.saturating_sub(page),
+                        Direction::PageDown => (cur_pos + page).min(indices.len() - 1),
                     };
                     let new_orig = indices[new_pos];
                     Some((new_orig, artists[new_orig].id.clone()))
@@ -2161,11 +2349,14 @@ impl App {
                         let cur_pos = self.library.selected_album
                             .and_then(|sel| indices.iter().position(|&i| i == sel))
                             .unwrap_or(0);
+                        let page = self.browser_list_viewport_rows.max(1);
                         let new_pos = match dir {
                             Direction::Up => cur_pos.saturating_sub(1),
                             Direction::Down => (cur_pos + 1).min(indices.len() - 1),
                             Direction::Top => 0,
                             Direction::Bottom => indices.len() - 1,
+                            Direction::PageUp => cur_pos.saturating_sub(page),
+                            Direction::PageDown => (cur_pos + page).min(indices.len() - 1),
                         };
                         let new_orig = indices[new_pos];
                         Some((new_orig, albums[new_orig].id.clone()))
@@ -2200,11 +2391,14 @@ impl App {
                     let cur_pos = self.library.selected_track
                         .and_then(|sel| indices.iter().position(|&i| i == sel))
                         .unwrap_or(0);
+                    let page = self.browser_list_viewport_rows.max(1);
                     let new_pos = match dir {
                         Direction::Up => cur_pos.saturating_sub(1),
                         Direction::Down => (cur_pos + 1).min(indices.len() - 1),
                         Direction::Top => 0,
                         Direction::Bottom => indices.len() - 1,
+                        Direction::PageUp => cur_pos.saturating_sub(page),
+                        Direction::PageDown => (cur_pos + page).min(indices.len() - 1),
                     };
                     self.library.selected_track = Some(indices[new_pos]);
                 }
@@ -2217,13 +2411,15 @@ impl App {
         if len == 0 {
             return;
         }
+        let page = self.queue_viewport_rows.max(1);
         self.queue.cursor = match dir {
             Direction::Up => self.queue.cursor.saturating_sub(1),
             Direction::Down => (self.queue.cursor + 1).min(len - 1),
             Direction::Top => 0,
             Direction::Bottom => len - 1,
+            Direction::PageUp => self.queue.cursor.saturating_sub(page),
+            Direction::PageDown => (self.queue.cursor + page).min(len - 1),
         };
-        self.queue.scroll = self.queue.cursor;
     }
 
     // ── Select ────────────────────────────────────────────────────────────────
@@ -2372,38 +2568,90 @@ impl App {
         }
     }
 
-    fn handle_add_all_to_queue(&mut self) {
-        match self.browser_focus {
-            BrowserColumn::Artists | BrowserColumn::Albums => {
-                // Fetch every album and every track for the selected artist,
-                // then push them all to the queue via AllTracksForArtist.
-                if let Some(artist) = self.library.current_artist() {
-                    let artist_id = artist.id.clone();
-                    let start_playing = self.queue.songs.is_empty();
-                    self.fetch_all_tracks_for_artist(artist_id, start_playing);
-                }
-            }
-            BrowserColumn::Tracks => {
-                // Add every track in the selected album to the queue.
-                let album_id = match self.library.current_album() {
-                    Some(a) => a.id.clone(),
-                    None => return,
-                };
-                if let Some(LoadingState::Loaded(songs)) = self.library.tracks.get(&album_id) {
-                    let was_empty = self.queue.songs.is_empty();
-                    let mut sorted = songs.clone();
-                    sorted.sort_by_key(|s| (s.disc_number.unwrap_or(1), s.track.unwrap_or(0)));
-                    for song in sorted {
-                        self.queue.push(song);
+    fn handle_add_all_to_queue(&mut self, mode: AddAllMode) {
+        match mode {
+            AddAllMode::ReplaceAlbum => self.handle_replace_queue_with_current_album(),
+            AddAllMode::ReplaceArtist => self.handle_replace_queue_with_current_artist(),
+            AddAllMode::Append | AddAllMode::Prepend => {
+                let prepend = matches!(mode, AddAllMode::Prepend);
+                match self.browser_focus {
+                    BrowserColumn::Artists | BrowserColumn::Albums => {
+                        if let Some(artist) = self.library.current_artist() {
+                            let artist_id = artist.id.clone();
+                            let start_playing = self.queue.songs.is_empty();
+                            self.fetch_all_tracks_for_artist(artist_id, start_playing, prepend);
+                        }
                     }
-                    if was_empty && !self.queue.songs.is_empty() {
-                        self.queue.cursor = 0;
-                        self.play_current();
+                    BrowserColumn::Tracks => {
+                        let album_id = match self.library.current_album() {
+                            Some(a) => a.id.clone(),
+                            None => return,
+                        };
+                        if let Some(LoadingState::Loaded(songs)) = self.library.tracks.get(&album_id) {
+                            let mut sorted = songs.clone();
+                            sorted.sort_by_key(|s| (s.disc_number.unwrap_or(1), s.track.unwrap_or(0)));
+                            let was_empty = self.queue.songs.is_empty();
+                            if prepend {
+                                self.queue.prepend_songs(sorted);
+                            } else {
+                                for song in sorted {
+                                    self.queue.push(song);
+                                }
+                            }
+                            if was_empty && !self.queue.songs.is_empty() {
+                                self.queue.cursor = 0;
+                                self.play_current();
+                            }
+                        }
                     }
                 }
-                // If tracks not loaded yet: no-op; proactive loading makes this rare.
             }
         }
+    }
+
+    /// Replace the queue with the current album's tracks (from cache), or start a fetch.
+    fn handle_replace_queue_with_current_album(&mut self) {
+        let album_id = match self.library.current_album() {
+            Some(a) => a.id.clone(),
+            None => {
+                self.flash_status("Select an album");
+                return;
+            }
+        };
+        if let Some(LoadingState::Loaded(songs)) = self.library.tracks.get(&album_id) {
+            let mut sorted = songs.clone();
+            sorted.sort_by_key(|s| (s.disc_number.unwrap_or(1), s.track.unwrap_or(0)));
+            self.handle_clear_queue();
+            for song in sorted {
+                self.queue.push(song);
+            }
+            if !self.queue.songs.is_empty() {
+                self.queue.cursor = 0;
+                self.queue.scroll = 0;
+                self.play_current();
+            }
+        } else {
+            let needs_fetch = matches!(
+                self.library.tracks.get(&album_id),
+                None | Some(LoadingState::NotLoaded | LoadingState::Error(_))
+            );
+            if needs_fetch {
+                self.library.tracks.insert(album_id.clone(), LoadingState::Loading);
+                self.fetch_tracks(album_id);
+            }
+            self.flash_status("Loading album tracks… press again when ready");
+        }
+    }
+
+    /// Replace the queue with all tracks for the current artist (background fetch).
+    fn handle_replace_queue_with_current_artist(&mut self) {
+        let Some(artist) = self.library.current_artist() else {
+            self.flash_status("Select an artist");
+            return;
+        };
+        let artist_id = artist.id.clone();
+        self.handle_clear_queue();
+        self.fetch_all_tracks_for_artist(artist_id, true, false);
     }
 
     fn handle_shuffle(&mut self) {
@@ -2488,7 +2736,8 @@ impl App {
             Tab::NowPlaying => {
                 if let Some(idx) = self.queue.songs.iter().position(|s| s.title.to_lowercase().contains(&q)) {
                     self.queue.cursor = idx;
-                    self.queue.scroll = idx;
+                    self.queue
+                        .scroll_clamp_cursor_visible(self.queue_viewport_rows.max(1));
                 }
             }
         }
@@ -2518,7 +2767,8 @@ impl App {
         if let Some(id) = current_id {
             if let Some(idx) = self.queue.songs.iter().position(|s| s.id == id) {
                 self.queue.cursor = idx;
-                self.queue.scroll = idx;
+                self.queue
+                    .scroll_clamp_cursor_visible(self.queue_viewport_rows.max(1));
             }
         }
     }
@@ -2587,7 +2837,8 @@ impl App {
     pub fn set_queue_cursor(&mut self, idx: usize) {
         if idx < self.queue.songs.len() {
             self.queue.cursor = idx;
-            self.queue.scroll = idx;
+            self.queue
+                .scroll_clamp_cursor_visible(self.queue_viewport_rows.max(1));
         }
     }
 

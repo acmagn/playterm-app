@@ -39,7 +39,7 @@ use action::{Action, Direction};
 use app::{App, BrowserColumn, Tab};
 use config::{Config, HomePanel};
 use keybinds::Keybinds;
-use state::{PlaylistFocus, PlaylistInputMode};
+use state::{GlobalConfirm, PlaylistFocus, PlaylistInputMode};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -192,6 +192,8 @@ fn run_library_fzf_picker(
     use crate::fzf_picker;
     use crate::library_index;
 
+    app.pending_gg = false;
+
     if !app.config.library_index_enabled {
         app.flash_status("Library index is disabled in config");
         return Ok(());
@@ -201,7 +203,7 @@ fn run_library_fzf_picker(
         return Ok(());
     }
     if app.library_index_tracks.is_empty() {
-        app.flash_status("Library index empty — wait for refresh or press Ctrl+r");
+        app.flash_status("Library index empty — wait for refresh or use the index refresh shortcut (default Ctrl+g)");
         return Ok(());
     }
 
@@ -461,6 +463,7 @@ async fn run_loop(
                     app.home.album_scroll_offset,
                     app.home.album_selected_index,
                     &app.home_art_cache,
+                    &mut app.home_strip_thumb_prepared,
                     strip_rect,
                     app.cell_px,
                     albums_inner.x,
@@ -532,6 +535,7 @@ async fn run_loop(
                                     key.modifiers,
                                     app.active_tab,
                                     &app.keybinds,
+                                    &mut app.pending_gg,
                                 );
                                 app.dispatch(action);
                             } else if is_quit_in_normal {
@@ -543,6 +547,7 @@ async fn run_loop(
                                     key.modifiers,
                                     &app.playlist_overlay.focus,
                                     &app.playlist_overlay.input_mode,
+                                    &app.keybinds,
                                 );
                                 app.dispatch(action);
                             }
@@ -551,8 +556,24 @@ async fn run_loop(
                                 map_help_key(key.code, key.modifiers, &app.keybinds)
                             } else if app.search_mode.active {
                                 map_search_key(key.code)
+                            } else if app.pending_global_confirm == Some(GlobalConfirm::LibraryIndexRefresh) {
+                                match key.code {
+                                    KeyCode::Char('y') | KeyCode::Char('Y') => {
+                                        Action::ConfirmLibraryIndexRefresh
+                                    }
+                                    KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                                        Action::CancelGlobalConfirm
+                                    }
+                                    _ => Action::None,
+                                }
                             } else {
-                                map_key(key.code, key.modifiers, app.active_tab, &app.keybinds)
+                                map_key(
+                                    key.code,
+                                    key.modifiers,
+                                    app.active_tab,
+                                    &app.keybinds,
+                                    &mut app.pending_gg,
+                                )
                             };
                             match action {
                                 Action::LibraryFzfPicker => {
@@ -795,6 +816,7 @@ fn map_playlist_key(
     modifiers: KeyModifiers,
     focus: &PlaylistFocus,
     input_mode: &PlaylistInputMode,
+    kb: &Keybinds,
 ) -> Action {
     match input_mode {
         // ── Text-input modes: feed characters into the buffer ──────────────
@@ -815,11 +837,8 @@ fn map_playlist_key(
         PlaylistInputMode::Normal => {
             let shift = modifiers.intersects(KeyModifiers::SHIFT);
             match code {
-                KeyCode::Esc   => Action::TogglePlaylistOverlay,
-                // Shift+P toggles the overlay closed (mirrors the map_key open binding).
-                KeyCode::Char('P') | KeyCode::Char('p') if code == KeyCode::Char('P') || shift => {
-                    Action::TogglePlaylistOverlay
-                }
+                KeyCode::Esc => Action::TogglePlaylistOverlay,
+                _ if kb.playlist_overlay.matches(code, modifiers) => Action::TogglePlaylistOverlay,
                 KeyCode::Char('k') | KeyCode::Up   => Action::PlaylistScrollUp,
                 KeyCode::Char('j') | KeyCode::Down => Action::PlaylistScrollDown,
                 KeyCode::Char('h') => Action::PlaylistFocusList,
@@ -864,67 +883,101 @@ fn map_picker_key(code: KeyCode, _modifiers: KeyModifiers) -> Action {
     }
 }
 
-fn map_key(code: KeyCode, modifiers: KeyModifiers, active_tab: Tab, kb: &Keybinds) -> Action {
+fn map_key(
+    code: KeyCode,
+    modifiers: KeyModifiers,
+    active_tab: Tab,
+    kb: &Keybinds,
+    pending_gg: &mut bool,
+) -> Action {
+    // Second `g` after a lone `g`: vim-style `gg` → top.
+    if *pending_gg {
+        *pending_gg = false;
+        if code == KeyCode::Char('g') && modifiers.is_empty() {
+            return Action::Navigate(Direction::Top);
+        }
+    }
+
     // ── Browser-tab-specific keys ─────────────────────────────────────────────
     if active_tab == Tab::Browser {
-        // Shift+P — open/close the playlist overlay
-        let shift = modifiers.intersects(KeyModifiers::SHIFT);
-        if code == KeyCode::Char('P') || (code == KeyCode::Char('p') && shift) {
+        if kb.playlist_overlay.matches(code, modifiers) {
             return Action::TogglePlaylistOverlay;
         }
-        // > — open playlist picker to add focused track to a playlist
-        if code == KeyCode::Char('>') {
+        if kb.browser_add_to_playlist.matches(code, modifiers) {
             return Action::BrowserAddToPlaylist;
         }
     }
 
     // ── Home-tab-specific keys ────────────────────────────────────────────────
     if active_tab == Tab::Home {
-        // J / Shift+j: move to next section.
-        // Handle both KeyCode::Char('J') (most terminals) and
-        // KeyCode::Char('j')+SHIFT (Ghostty / kitty keyboard protocol).
-        let shift = modifiers.intersects(KeyModifiers::SHIFT);
-        if code == KeyCode::Char('J') || (code == KeyCode::Char('j') && shift) {
+        if kb.home_section_next.matches(code, modifiers) {
             return Action::HomeSectionNext;
         }
-        // K / Shift+k: move to previous section.
-        if code == KeyCode::Char('K') || (code == KeyCode::Char('k') && shift) {
+        if kb.home_section_prev.matches(code, modifiers) {
             return Action::HomeSectionPrev;
         }
-        // r: re-roll rediscover / refresh data
-        if code == KeyCode::Char('r') && modifiers.is_empty() { return Action::HomeRefresh; }
-        // h/l: navigate album strip left/right (only active when RecentAlbums section is focused)
-        if code == KeyCode::Char('h') && modifiers.is_empty() { return Action::HomeAlbumLeft; }
-        if code == KeyCode::Char('l') && modifiers.is_empty() { return Action::HomeAlbumRight; }
-        // a: append selected album to queue
-        if code == KeyCode::Char('a') && modifiers.is_empty() { return Action::HomeAlbumAddToQueue; }
+        if kb.home_refresh.matches(code, modifiers) {
+            return Action::HomeRefresh;
+        }
+        if kb.column_left.matches(code, modifiers) {
+            return Action::HomeAlbumLeft;
+        }
+        if kb.column_right.matches(code, modifiers) {
+            return Action::HomeAlbumRight;
+        }
+        if kb.add_track.matches(code, modifiers) {
+            return Action::HomeAlbumAddToQueue;
+        }
     }
 
     // ── Always-on / non-configurable ─────────────────────────────────────────
-    // g / G: jump to top/bottom — not exposed in config
-    if code == KeyCode::Char('g') && modifiers.is_empty() { return Action::Navigate(Direction::Top);    }
-    if code == KeyCode::Char('G') && modifiers.is_empty() { return Action::Navigate(Direction::Bottom); }
+    // G: jump to bottom — not exposed in config. Top is `gg` (handled via pending_gg).
+    // Terminals usually send Shift+G as `Char('G')` with SHIFT set, not bare `G`.
+    if code == KeyCode::Char('G')
+        && !modifiers.intersects(
+            KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER | KeyModifiers::HYPER,
+        )
+    {
+        return Action::Navigate(Direction::Bottom);
+    }
     // Enter / Esc — not configurable
     if code == KeyCode::Enter { return Action::Select; }
     if code == KeyCode::Esc   { return Action::Back;   }
-    // Space is always an alias for play_pause
-    if code == KeyCode::Char(' ') { return Action::PlayPause; }
+    // Space alone is an alias for play_pause.
+    if code == KeyCode::Char(' ') && modifiers.is_empty() {
+        return Action::PlayPause;
+    }
     // '=' is always a secondary alias for volume_up (easy to hit with +)
     if code == KeyCode::Char('=') { return Action::VolumeUp; }
-    // 'i' toggles the keybind help popup
-    if code == KeyCode::Char('i') && modifiers.is_empty() { return Action::ToggleHelp; }
-    // 't' toggles dynamic accent colour
-    if code == KeyCode::Char('t') && modifiers.is_empty() { return Action::ToggleDynamicTheme; }
-    // 'L' toggles lyrics overlay (NowPlaying tab only)
-    if code == KeyCode::Char('L') { return Action::ToggleLyrics; }
-    // 'V' toggles spectrum visualizer (NowPlaying tab only)
-    let shift = modifiers.intersects(KeyModifiers::SHIFT);
-    if code == KeyCode::Char('V') || (code == KeyCode::Char('v') && shift) {
+    if kb.toggle_help.matches(code, modifiers) {
+        return Action::ToggleHelp;
+    }
+    if kb.toggle_dynamic_theme.matches(code, modifiers) {
+        return Action::ToggleDynamicTheme;
+    }
+    if kb.toggle_lyrics.matches(code, modifiers) {
+        return Action::ToggleLyrics;
+    }
+    if kb.toggle_visualizer.matches(code, modifiers)
+        || code == KeyCode::Char('V')
+        || (code == KeyCode::Char('v') && modifiers.intersects(KeyModifiers::SHIFT))
+    {
         return Action::ToggleVisualizer;
     }
     // Up/Down arrows are always secondary scroll aliases
     if code == KeyCode::Up   { return Action::Navigate(Direction::Up);   }
     if code == KeyCode::Down { return Action::Navigate(Direction::Down); }
+    // PageUp/PageDown and vim-style Ctrl+u / Ctrl+d: lists on these tabs.
+    if matches!(active_tab, Tab::Browser | Tab::Home | Tab::NowPlaying) {
+        let ctrl = modifiers.intersects(KeyModifiers::CONTROL)
+            && !modifiers.intersects(KeyModifiers::ALT | KeyModifiers::SHIFT);
+        if code == KeyCode::PageUp || (ctrl && matches!(code, KeyCode::Char('u') | KeyCode::Char('U'))) {
+            return Action::Navigate(Direction::PageUp);
+        }
+        if code == KeyCode::PageDown || (ctrl && matches!(code, KeyCode::Char('d') | KeyCode::Char('D'))) {
+            return Action::Navigate(Direction::PageDown);
+        }
+    }
 
     // ── Configurable keybinds ─────────────────────────────────────────────────
     if kb.quit.matches(code, modifiers)              { return Action::Quit;             }
@@ -960,7 +1013,22 @@ fn map_key(code: KeyCode, modifiers: KeyModifiers, active_tab: Tab, kb: &Keybind
     if kb.next_track.matches(code, modifiers)   { return Action::NextTrack;    }
     if kb.prev_track.matches(code, modifiers)   { return Action::PrevTrack;    }
 
-    // add_all must be checked before add_track (it's typically a superset key).
+    // add_all variants must be checked before add_track (superset keys).
+    if let Some(spec) = &kb.add_all_replace_artist {
+        if spec.matches(code, modifiers) {
+            return Action::AddAllToQueueReplaceArtist;
+        }
+    }
+    if let Some(spec) = &kb.add_all_replace_album {
+        if spec.matches(code, modifiers) {
+            return Action::AddAllToQueueReplaceAlbum;
+        }
+    }
+    if let Some(spec) = &kb.add_all_prepend {
+        if spec.matches(code, modifiers) {
+            return Action::AddAllToQueuePrepend;
+        }
+    }
     if kb.add_all.matches(code, modifiers)      { return Action::AddAllToQueue; }
     if kb.add_track.matches(code, modifiers)    { return Action::AddToQueue;    }
 
@@ -982,6 +1050,12 @@ fn map_key(code: KeyCode, modifiers: KeyModifiers, active_tab: Tab, kb: &Keybind
         }
     }
 
+    // Lone `g`: wait for second `g` (`gg`) to go to top (vim-style).
+    if code == KeyCode::Char('g') && modifiers.is_empty() {
+        *pending_gg = true;
+        return Action::None;
+    }
+
     Action::None
 }
 
@@ -999,9 +1073,21 @@ fn map_search_key(code: KeyCode) -> Action {
 /// Only `i`, `Esc`, and the configured quit key close the popup — everything
 /// else is suppressed so no accidental navigation occurs.
 fn map_help_key(code: KeyCode, modifiers: KeyModifiers, kb: &Keybinds) -> Action {
-    if code == KeyCode::Char('i') && modifiers.is_empty() { return Action::ToggleHelp; }
-    if code == KeyCode::Esc                               { return Action::ToggleHelp; }
-    if kb.quit.matches(code, modifiers)                   { return Action::ToggleHelp; }
+    if kb.toggle_help.matches(code, modifiers) {
+        return Action::ToggleHelp;
+    }
+    if code == KeyCode::Esc {
+        return Action::ToggleHelp;
+    }
+    if kb.quit.matches(code, modifiers) {
+        return Action::ToggleHelp;
+    }
+    if code == KeyCode::Char('k') || code == KeyCode::Up {
+        return Action::HelpScrollUp;
+    }
+    if code == KeyCode::Char('j') || code == KeyCode::Down {
+        return Action::HelpScrollDown;
+    }
     Action::None
 }
 

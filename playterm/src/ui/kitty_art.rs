@@ -6,6 +6,7 @@
 //! Images are transmitted with `a=T` (transmit-and-display), `f=32` (RGBA8),
 //! `o=z` (zlib-compressed), and positioned via a preceding cursor-move escape.
 
+use std::collections::HashMap;
 use std::io::{self, Write};
 
 use anyhow::Result;
@@ -437,6 +438,50 @@ pub fn visible_thumbnail_count(terminal_cols: u16, thumb_cols: u16, gap_cols: u1
     count.max(1)
 }
 
+/// Cached resize + zlib for one Home-strip thumbnail (Kitty image id is chosen per slot at draw time).
+#[derive(Debug, Clone)]
+pub struct StripThumbPrepared {
+    /// Edge length in pixels used when this payload was built (must match current strip).
+    pub thumb_px: u32,
+    pub img_w: u32,
+    pub img_h: u32,
+    /// Base64 of zlib-compressed RGBA — built once so tab redraws skip re-encoding.
+    pub b64: String,
+}
+
+impl StripThumbPrepared {
+    pub fn matches_size(&self, thumb_px: u32) -> bool {
+        self.thumb_px == thumb_px
+    }
+
+    /// Decode server cover bytes, resize for the strip, zlib-compress RGBA (same as Kitty `o=z`).
+    pub fn build(cover_bytes: &[u8], thumb_px: u32) -> Option<Self> {
+        use base64::Engine;
+        use flate2::Compression;
+        use flate2::write::ZlibEncoder;
+        use image::imageops::FilterType;
+        use std::io::Write;
+
+        let img = image::load_from_memory(cover_bytes).ok()?;
+        // Triangle is much cheaper than Lanczos3; strip thumbs are small so quality stays acceptable.
+        let img = img.resize_exact(thumb_px, thumb_px, FilterType::Triangle);
+        let img_rgba = img.to_rgba8();
+        let (w, h) = img_rgba.dimensions();
+        let raw = img_rgba.into_raw();
+        // Fast zlib: Kitty only needs valid compressed RGBA; size difference is tiny vs decode cost.
+        let mut enc = ZlibEncoder::new(Vec::new(), Compression::fast());
+        enc.write_all(&raw).ok()?;
+        let zlib_body = enc.finish().ok()?;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&zlib_body);
+        Some(Self {
+            thumb_px,
+            img_w: w,
+            img_h: h,
+            b64,
+        })
+    }
+}
+
 // ── Art strip rendering ───────────────────────────────────────────────────────
 
 /// Render the home tab art strip using Kitty protocol.
@@ -448,17 +493,14 @@ pub fn render_art_strip(
     albums: &[crate::app::RecentAlbum],
     scroll_offset: usize,
     _selected_index: usize,
-    art_cache: &std::collections::HashMap<String, Vec<u8>>,
+    art_cache: &HashMap<String, Vec<u8>>,
+    prepared: &mut HashMap<String, StripThumbPrepared>,
     strip_area: ratatui::layout::Rect,
     cell_px: Option<(u16, u16)>,
     terminal_col_offset: u16,
     terminal_row_offset: u16,
     in_tmux: bool,
 ) {
-    use base64::Engine;
-    use flate2::Compression;
-    use flate2::write::ZlibEncoder;
-
     // Pre-clear previous art strip images/placements before drawing new ones.
     if in_tmux {
         // tmux path: delete virtual placements (d=i lowercase).
@@ -473,8 +515,6 @@ pub fn render_art_strip(
     // Use strip height in cells as both width and height (square grid).
     // Fixed 32 px/cell — reliable on HiDPI Ghostty; avoids trusting CSI 16 t.
     let thumb_px = thumb_rows as u32 * 32;
-    let px_w = thumb_px;
-    let px_h = thumb_px;
 
     for i in 0..visible_count {
         let album_index = scroll_offset + i;
@@ -485,23 +525,15 @@ pub fn render_art_strip(
         let kitty_id: u32 = 100 + i as u32;
 
         if let Some(bytes) = art_cache.get(album_id) {
-            // Decode and resize.
-            let img = match image::load_from_memory(bytes) {
-                Ok(i) => i,
-                Err(_) => continue,
+            let prep = match prepared.remove(album_id) {
+                Some(p) if p.matches_size(thumb_px) => p,
+                _ => match StripThumbPrepared::build(bytes, thumb_px) {
+                    Some(p) => p,
+                    None => continue,
+                },
             };
-            let img = img.resize_exact(px_w, px_h, image::imageops::FilterType::Lanczos3);
-            let img_rgba = img.to_rgba8();
-            let (w, h) = img_rgba.dimensions();
-            let raw = img_rgba.into_raw();
-
-            // Zlib-compress.
-            let mut enc = ZlibEncoder::new(Vec::new(), Compression::default());
-            if enc.write_all(&raw).is_err() { continue; }
-            let compressed = match enc.finish() { Ok(c) => c, Err(_) => continue };
-
-            // Base64-encode.
-            let b64 = base64::engine::general_purpose::STANDARD.encode(&compressed);
+            let w = prep.img_w;
+            let h = prep.img_h;
 
             let col = terminal_col_offset + i as u16 * (thumb_cols + 1);
             let row = terminal_row_offset;
@@ -510,10 +542,10 @@ pub fn render_art_strip(
 
             // Transmit image in chunks (same for both paths — a=t: store only).
             const CHUNK: usize = 4096;
-            let chunks: Vec<&[u8]> = b64.as_bytes().chunks(CHUNK).collect();
-            let n = chunks.len();
-            for (ci, chunk) in chunks.iter().enumerate() {
-                let is_last = ci == n - 1;
+            let b64_bytes = prep.b64.as_bytes();
+            let n_chunks = (b64_bytes.len() + CHUNK - 1) / CHUNK;
+            for (ci, chunk) in b64_bytes.chunks(CHUNK).enumerate() {
+                let is_last = ci + 1 == n_chunks || n_chunks == 0;
                 let m = if is_last { 0u8 } else { 1u8 };
                 let chunk_str = unsafe { std::str::from_utf8_unchecked(chunk) };
                 if ci == 0 {
@@ -556,6 +588,7 @@ pub fn render_art_strip(
                 );
             }
             let _ = out.flush();
+            prepared.insert(album_id.clone(), prep);
         }
         // If bytes are NOT in cache, leave the cells blank — ratatui has already
         // drawn the placeholder character(s) via the text fallback path in home_tab.rs.
