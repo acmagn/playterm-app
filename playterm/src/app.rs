@@ -1,10 +1,12 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, mpsc as std_mpsc};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
+use ratatui::layout::Rect;
 use ratatui::style::Color;
 use tokio::sync::mpsc;
 
@@ -15,7 +17,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::action::{Action, Direction};
 use crate::color::{extract_accent, lerp_color};
-use crate::config::Config;
+use crate::config::{AlbumArtBackend, Config};
+use image::{DynamicImage, imageops::FilterType};
+use ratatui_image::picker::ProtocolType;
+use ratatui_image::Resize;
+use ratatui_image::thread::{ResizeRequest, ResizeResponse, ThreadProtocol};
 use crate::history::PlayRecord;
 use crate::keybinds::Keybinds;
 use crate::state::{
@@ -79,16 +85,6 @@ fn humanize_playback_error(message: &str) -> String {
 enum ResolvedPlayback {
     Url(String),
     Cached(PathBuf),
-}
-
-/// Approximate number of visible album thumbnails given cell pixel dimensions.
-/// Assumes the strip is ~80 columns wide (fallback when terminal size unavailable).
-fn compute_visible_count(cell_px: Option<(u16, u16)>, fallback: usize) -> usize {
-    use crate::ui::kitty_art::{art_strip_thumbnail_size, visible_thumbnail_count};
-    let (thumb_cols, _) = art_strip_thumbnail_size(cell_px, 8);
-    let approx_term_cols = 80u16;
-    let count = visible_thumbnail_count(approx_term_cols, thumb_cols, 1);
-    if count < 1 { fallback } else { count }
 }
 
 // ── Tab ───────────────────────────────────────────────────────────────────────
@@ -343,6 +339,10 @@ pub struct App {
     /// Cached cover art: `(cover_art_id, raw_image_bytes)`.
     /// Updated whenever a new track starts with a different cover ID.
     pub art_cache: Option<(String, Vec<u8>)>,
+    /// FNV digest of `art_cache` bytes — stable across tracks that share the same image.
+    pub art_cache_fingerprint: Option<u64>,
+    /// Decoded `art_cache` image for the current fingerprint — avoids JPEG decode on every resize.
+    pub art_cache_decoded: Option<(u64, DynamicImage)>,
     /// Home tab album art cache: `album_id → raw image bytes`.
     pub home_art_cache: HashMap<String, Vec<u8>>,
     /// Album IDs for which a home art fetch is currently in flight.
@@ -386,6 +386,12 @@ pub struct App {
     /// Timestamp of the last tmux art-strip render; used to batch HomeArt
     /// arrivals so each individual fetch doesn't trigger a full re-transmit.
     pub home_art_last_tmux_render: Option<Instant>,
+    /// Last inner rect of the Recently Played block (updated each Home render); drives strip scroll math.
+    pub home_recent_albums_inner: Option<Rect>,
+    /// After terminal resize, strip caches are cleared only once this instant is reached (debounce).
+    pub home_strip_resize_settle: Option<Instant>,
+    /// Fingerprint of strip layout; used to avoid re-encoding when resize settles with same thumb grid.
+    pub home_strip_layout_key: Option<u64>,
 
     // ── Lyrics (Feature 5.2) ──────────────────────────────────────────────────
     /// Whether the lyrics overlay is currently visible (NowPlaying tab only).
@@ -459,6 +465,21 @@ pub struct App {
     /// Linux: MPRIS D-Bus session registration and shared playback snapshot.
     #[cfg(target_os = "linux")]
     pub mpris: Option<crate::mpris::MprisLink>,
+
+    /// Set after alternate screen when `album_art_backend = ratatui-image` and the probe succeeds.
+    pub art_picker: Option<ratatui_image::picker::Picker>,
+    /// Now Playing album art — encode runs on `ratatui_resize` worker thread (`ThreadProtocol`).
+    pub np_art_state: Option<ThreadProtocol>,
+    /// Worker queue for `ResizeRequest` (Now Playing only; home strip stays on-thread for now).
+    pub ratatui_resize_tx: Option<Sender<ResizeRequest>>,
+    pub ratatui_resize_rx:
+        Option<Receiver<Result<ResizeResponse, ratatui_image::errors::Errors>>>,
+    /// `(bytes_digest, inner_w, inner_h)` — rebuild when pixels or art `Rect` change.
+    pub np_art_prep_key: Option<(u64, u16, u16)>,
+    /// Home art strip: one protocol state per `album_id`.
+    pub home_strip_art: HashMap<String, ratatui_image::protocol::StatefulProtocol>,
+    /// Last thumbnail cell size per album — rebuild strip slot when layout resizes.
+    pub home_strip_last_cells: HashMap<String, (u16, u16)>,
 }
 
 impl App {
@@ -503,6 +524,8 @@ impl App {
             tmux_status_offset: 0,
             cell_px: None,
             art_cache: None,
+            art_cache_fingerprint: None,
+            art_cache_decoded: None,
             home_art_cache: HashMap::new(),
             home_art_loading: HashSet::new(),
             home_strip_thumb_prepared: HashMap::new(),
@@ -519,6 +542,9 @@ impl App {
             help_visible: false,
             home_art_needs_redraw: false,
             home_art_last_tmux_render: None,
+            home_recent_albums_inner: None,
+            home_strip_resize_settle: None,
+            home_strip_layout_key: None,
             home: HomeState::default(),
             pending_artist_select: None,
             playlist_overlay: PlaylistOverlay::default(),
@@ -544,9 +570,150 @@ impl App {
             accent_lerp_from: static_accent,
             accent_target: static_accent,
             accent_transition_start: None,
+            art_picker: None,
+            np_art_state: None,
+            ratatui_resize_tx: None,
+            ratatui_resize_rx: None,
+            np_art_prep_key: None,
+            home_strip_art: HashMap::new(),
+            home_strip_last_cells: HashMap::new(),
             #[cfg(target_os = "linux")]
             mpris: None,
         })
+    }
+
+    /// Legacy Kitty APC post-draw path is active.
+    pub fn legacy_kitty_graphics_ready(&self) -> bool {
+        matches!(self.config.album_art_backend, AlbumArtBackend::KittyLegacy) && self.kitty_supported
+    }
+
+    /// `ratatui-image` picker initialized (terminal query succeeded).
+    pub fn ratatui_art_ready(&self) -> bool {
+        matches!(self.config.album_art_backend, AlbumArtBackend::RatatuiImage) && self.art_picker.is_some()
+    }
+
+    /// Picker chose Kitty graphics — use the same post-draw APC path as `kitty_art`, not `StatefulImage`.
+    ///
+    /// ratatui-image's in-buffer Kitty backend can re-encode pathologically; our hand-rolled APC is
+    /// battle-tested for this app.
+    pub fn ratatui_uses_kitty_apc(&self) -> bool {
+        self.ratatui_art_ready()
+            && self
+                .art_picker
+                .as_ref()
+                .is_some_and(|p| matches!(p.protocol_type(), ProtocolType::Kitty))
+    }
+
+    /// Any path that draws album art via Kitty APC **after** `terminal.draw` (legacy or ratatui+Kitty).
+    pub fn kitty_apc_overlay_active(&self) -> bool {
+        self.legacy_kitty_graphics_ready() || self.ratatui_uses_kitty_apc()
+    }
+
+    /// `Resize` mode for `ratatui-image` [`StatefulImage`] (Sixel / halfblocks / iTerm2 — not Kitty APC).
+    ///
+    /// [`Resize::Fit`] caps the raster to the **source** pixel size, then pads the cell area with the
+    /// background colour — common Sixel symptom: empty bands on the bottom/right. [`Resize::Scale`]
+    /// upscales after our `art_prepare` budget so the image fills the allocated cells (still
+    /// letterboxed if aspect ratios differ, but much less dead space).
+    pub fn ratatui_stateful_resize(&self) -> Resize {
+        Resize::Scale(Some(FilterType::Triangle))
+    }
+
+    /// Home strip: bitmap is exact super-res cell size after crop (`prepare_art_image_for_strip`).
+    pub fn ratatui_stateful_resize_strip(&self) -> Resize {
+        Resize::Scale(Some(FilterType::Triangle))
+    }
+
+    /// Visible album slots in the Recently Played strip (fixed-size thumbs, 1–2 rows).
+    pub fn home_album_strip_visible_count(&self) -> usize {
+        use crate::ui::kitty_art::art_strip_layout;
+        const FALLBACK: usize = 12;
+        self.home_recent_albums_inner
+            .map(|inner| art_strip_layout(inner.width, inner.height).total_visible.max(1))
+            .unwrap_or(FALLBACK)
+    }
+
+    /// Home strip should use graphics (either backend), and the help overlay is closed.
+    pub fn home_strip_graphics_wanted(&self, help_visible: bool) -> bool {
+        self.config.home_recent_albums_show_art
+            && !help_visible
+            && (self.legacy_kitty_graphics_ready() || self.ratatui_art_ready())
+    }
+
+    /// Drop all `ratatui-image` protocol state (tab switch, help overlay, fzf suspend, …).
+    pub fn clear_ratatui_art_state(&mut self) {
+        self.np_art_state = None;
+        self.np_art_prep_key = None;
+        self.home_strip_art.clear();
+        self.home_strip_last_cells.clear();
+        self.home_strip_layout_key = None;
+        self.home_strip_resize_settle = None;
+    }
+
+    /// Now Playing ratatui art only (terminal resize before debounced strip invalidation).
+    pub fn clear_np_ratatui_art_state(&mut self) {
+        self.np_art_state = None;
+        self.np_art_prep_key = None;
+    }
+
+    pub fn schedule_home_strip_resize_invalidate(&mut self) {
+        self.home_strip_resize_settle = Some(Instant::now() + Duration::from_millis(200));
+    }
+
+    /// Call after `terminal.draw` when Home may be visible. Debounces strip re-encode on resize.
+    pub fn apply_home_strip_resize_settle(&mut self) {
+        let Some(deadline) = self.home_strip_resize_settle else {
+            return;
+        };
+        if Instant::now() < deadline {
+            return;
+        }
+        if self.active_tab != Tab::Home {
+            self.home_strip_resize_settle = None;
+            return;
+        }
+        let Some(inner) = self.home_recent_albums_inner else {
+            self.home_strip_resize_settle = None;
+            return;
+        };
+        self.home_strip_resize_settle = None;
+        use crate::ui::kitty_art::{art_strip_layout, strip_layout_key};
+        let layout = art_strip_layout(inner.width, inner.height);
+        let key = strip_layout_key(inner, &layout);
+        if self.home_strip_layout_key == Some(key) {
+            return;
+        }
+        let prev = self.home_strip_layout_key;
+        self.home_strip_layout_key = Some(key);
+        let need_clear = prev.map_or(
+            !self.home_strip_art.is_empty() || !self.home_strip_thumb_prepared.is_empty(),
+            |old| old != key,
+        );
+        if !need_clear {
+            return;
+        }
+        self.home_strip_art.clear();
+        self.home_strip_last_cells.clear();
+        self.home_strip_thumb_prepared.clear();
+        if self.kitty_apc_overlay_active() {
+            let _ = crate::ui::kitty_art::clear_art_strip(self.in_tmux);
+        }
+        self.home_art_needs_redraw = true;
+    }
+
+    /// Match legacy Kitty clears on tab navigation: NP overlay always; Home strip when leaving Home.
+    ///
+    /// For **non-Kitty** `ratatui-image` (Sixel, etc.) we **do not** drop `StatefulProtocol` /
+    /// `ThreadProtocol` here: clearing forces a full re-encode on every tab visit and is very slow
+    /// in Foot. The next frame’s ratatui draw covers those cells; if a terminal leaves stray
+    /// graphics, resize/fzf/focus still clear state.
+    fn clear_art_on_tab_switch(&mut self) {
+        if self.kitty_apc_overlay_active() {
+            let _ = crate::ui::kitty_art::clear_image(self.in_tmux);
+            if self.active_tab == Tab::Home {
+                let _ = crate::ui::kitty_art::clear_art_strip(self.in_tmux);
+            }
+        }
     }
 
     // ── Accent colour helpers ─────────────────────────────────────────────────
@@ -1200,7 +1367,10 @@ impl App {
             LibraryUpdate::CoverArt { cover_id, bytes } => {
                 // Extract dynamic accent before storing (bytes are consumed here).
                 let accent = extract_accent(&bytes);
+                let fp = crate::ui::art_prepare::art_bytes_fingerprint(&bytes);
                 self.art_cache = Some((cover_id, bytes));
+                self.art_cache_fingerprint = Some(fp);
+                self.art_cache_decoded = None;
                 self.apply_dynamic_accent(accent);
                 #[cfg(target_os = "linux")]
                 self.mpris_emit_props();
@@ -1216,6 +1386,8 @@ impl App {
             LibraryUpdate::HomeArt { album_id, bytes } => {
                 self.home_art_loading.remove(&album_id);
                 self.home_strip_thumb_prepared.remove(&album_id);
+                self.home_strip_art.remove(&album_id);
+                self.home_strip_last_cells.remove(&album_id);
                 self.home_art_cache.insert(album_id, bytes);
                 // A fetch slot opened up — check if more albums need fetching.
                 self.spawn_pending_home_art_fetches();
@@ -1773,14 +1945,22 @@ impl App {
                 if !was_visible && self.help_visible {
                     self.help_scroll = 0;
                 }
-                if self.kitty_supported && self.active_tab == Tab::Home {
-                    if !was_visible {
-                        // Opening popup on Home tab — clear art strip so it doesn't
-                        // bleed through the popup overlay.
-                        let _ = crate::ui::kitty_art::clear_art_strip(self.in_tmux);
-                    } else {
-                        // Closing popup on Home tab — request art strip redraw on next frame.
-                        self.home_art_needs_redraw = true;
+                if self.active_tab == Tab::Home {
+                    if self.kitty_apc_overlay_active() {
+                        if !was_visible && self.help_visible {
+                            // Opening help — clear Kitty strip so it doesn't bleed through.
+                            let _ = crate::ui::kitty_art::clear_art_strip(self.in_tmux);
+                        } else if was_visible && !self.help_visible {
+                            // Closing help — post-draw strip redraw.
+                            self.home_art_needs_redraw = true;
+                        }
+                    }
+                    if self.ratatui_art_ready()
+                        && !self.ratatui_uses_kitty_apc()
+                        && !was_visible
+                        && self.help_visible
+                    {
+                        self.clear_ratatui_art_state();
                     }
                 }
             }
@@ -1814,12 +1994,7 @@ impl App {
             Action::SwitchTab => {
                 self.playlist_overlay.visible = false;
                 self.playlist_picker = None;
-                if self.kitty_supported {
-                    let _ = crate::ui::kitty_art::clear_image(self.in_tmux);
-                    if self.active_tab == Tab::Home {
-                        let _ = crate::ui::kitty_art::clear_art_strip(self.in_tmux);
-                    }
-                }
+                self.clear_art_on_tab_switch();
                 self.active_tab = self.active_tab.next();
                 self.search_filter = None;
                 if self.active_tab == Tab::Home {
@@ -1830,12 +2005,7 @@ impl App {
             Action::SwitchTabReverse => {
                 self.playlist_overlay.visible = false;
                 self.playlist_picker = None;
-                if self.kitty_supported {
-                    let _ = crate::ui::kitty_art::clear_image(self.in_tmux);
-                    if self.active_tab == Tab::Home {
-                        let _ = crate::ui::kitty_art::clear_art_strip(self.in_tmux);
-                    }
-                }
+                self.clear_art_on_tab_switch();
                 self.active_tab = self.active_tab.prev();
                 self.search_filter = None;
                 if self.active_tab == Tab::Home {
@@ -1846,7 +2016,9 @@ impl App {
             Action::GoToHome => {
                 self.playlist_overlay.visible = false;
                 self.playlist_picker = None;
-                if self.kitty_supported { let _ = crate::ui::kitty_art::clear_image(self.in_tmux); }
+                if self.kitty_apc_overlay_active() {
+                    let _ = crate::ui::kitty_art::clear_image(self.in_tmux);
+                }
                 self.active_tab = Tab::Home;
                 self.search_filter = None;
                 self.refresh_home_data();
@@ -1855,12 +2027,7 @@ impl App {
             Action::GoToBrowser => {
                 self.playlist_overlay.visible = false;
                 self.playlist_picker = None;
-                if self.kitty_supported {
-                    let _ = crate::ui::kitty_art::clear_image(self.in_tmux);
-                    if self.active_tab == Tab::Home {
-                        let _ = crate::ui::kitty_art::clear_art_strip(self.in_tmux);
-                    }
-                }
+                self.clear_art_on_tab_switch();
                 self.active_tab = Tab::Browser;
                 self.search_filter = None;
                 self.apply_pending_artist_select();
@@ -1868,12 +2035,7 @@ impl App {
             Action::GoToNowPlaying => {
                 self.playlist_overlay.visible = false;
                 self.playlist_picker = None;
-                if self.kitty_supported {
-                    let _ = crate::ui::kitty_art::clear_image(self.in_tmux);
-                    if self.active_tab == Tab::Home {
-                        let _ = crate::ui::kitty_art::clear_art_strip(self.in_tmux);
-                    }
-                }
+                self.clear_art_on_tab_switch();
                 self.active_tab = Tab::NowPlaying;
                 self.search_filter = None;
             }
@@ -2088,8 +2250,7 @@ impl App {
                         let max_idx = self.home.recent_albums.len().saturating_sub(1);
                         if self.home.album_selected_index < max_idx {
                             self.home.album_selected_index += 1;
-                            // visible_count: approximate from cell_px; assume 5 if unknown
-                            let visible_count = compute_visible_count(self.cell_px, 5);
+                            let visible_count = self.home_album_strip_visible_count();
                             let scroll_end = self.home.album_scroll_offset + visible_count.saturating_sub(1);
                             if self.home.album_selected_index > scroll_end {
                                 self.home.album_scroll_offset += 1;
@@ -2449,9 +2610,12 @@ impl App {
                 let idx = self.home.album_selected_index;
                 if let Some(album) = self.home.recent_albums.get(idx) {
                     let artist_name = album.artist_name.clone();
-                    if self.kitty_supported {
+                    if self.kitty_apc_overlay_active() {
                         let _ = crate::ui::kitty_art::clear_image(self.in_tmux);
                         let _ = crate::ui::kitty_art::clear_art_strip(self.in_tmux);
+                    }
+                    if self.ratatui_art_ready() && !self.ratatui_uses_kitty_apc() {
+                        self.clear_ratatui_art_state();
                     }
                     self.pending_artist_select = Some(artist_name);
                     self.active_tab = Tab::Browser;
@@ -2532,9 +2696,12 @@ impl App {
             }
             HomeSection::TopArtists => {
                 // Switch to Browser tab.
-                if self.kitty_supported {
+                if self.kitty_apc_overlay_active() {
                     let _ = crate::ui::kitty_art::clear_image(self.in_tmux);
                     let _ = crate::ui::kitty_art::clear_art_strip(self.in_tmux);
+                }
+                if self.ratatui_art_ready() && !self.ratatui_uses_kitty_apc() {
+                    self.clear_ratatui_art_state();
                 }
                 self.active_tab = Tab::Browser;
                 self.search_filter = None;
@@ -2544,9 +2711,12 @@ impl App {
                 if let Some((_, artist_name)) = self.home.rediscover.get(self.home.selected_index) {
                     self.pending_artist_select = Some(artist_name.clone());
                 }
-                if self.kitty_supported {
+                if self.kitty_apc_overlay_active() {
                     let _ = crate::ui::kitty_art::clear_image(self.in_tmux);
                     let _ = crate::ui::kitty_art::clear_art_strip(self.in_tmux);
+                }
+                if self.ratatui_art_ready() && !self.ratatui_uses_kitty_apc() {
+                    self.clear_ratatui_art_state();
                 }
                 self.active_tab = Tab::Browser;
                 self.apply_pending_artist_select();

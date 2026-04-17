@@ -3,6 +3,17 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
+/// How album art is rendered in the terminal (Now Playing column + Home strip).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AlbumArtBackend {
+    /// Multi-protocol rendering via `ratatui-image` (Kitty, Sixel, iTerm2, half-blocks, …).
+    #[default]
+    RatatuiImage,
+    /// Original Kitty APC + post-draw path (for side-by-side testing).
+    KittyLegacy,
+}
+
 // ── File-level serde structs ──────────────────────────────────────────────────
 
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -457,6 +468,9 @@ pub struct UiSection {
     /// NowPlaying tab: show the album-art column (placeholder today). Default: true.
     #[serde(default = "default_ui_nowplaying_show_art")]
     pub nowplaying_show_art: bool,
+    /// `ratatui-image` (default) vs legacy Kitty-only APC renderer.
+    #[serde(default)]
+    pub album_art_backend: AlbumArtBackend,
     /// NowPlaying tab: album art column side. Use `left` or `right` (case-insensitive; default: left).
     #[serde(default = "default_ui_nowplaying_art_position")]
     pub nowplaying_art_position: String,
@@ -552,6 +566,7 @@ impl Default for UiSection {
             queue_template: String::new(),
             progress_style: default_ui_progress_style(),
             nowplaying_show_art: default_ui_nowplaying_show_art(),
+            album_art_backend: AlbumArtBackend::default(),
             nowplaying_art_position: default_ui_nowplaying_art_position(),
             nowplaying_art_width_percent: default_ui_nowplaying_art_width_percent(),
             show_fzf_hint: default_ui_show_fzf_hint(),
@@ -719,6 +734,7 @@ pub struct Config {
     pub progress_style: String,
     /// NowPlaying tab: show the album-art column.
     pub nowplaying_show_art: bool,
+    pub album_art_backend: AlbumArtBackend,
     /// NowPlaying tab: album art side ("left" or "right").
     pub nowplaying_art_position: String,
     /// NowPlaying tab: album art width percentage.
@@ -992,6 +1008,7 @@ impl Config {
             queue_template,
             progress_style,
             nowplaying_show_art,
+            album_art_backend: ui.album_art_backend,
             nowplaying_art_position,
             nowplaying_art_width_percent,
             show_fzf_hint,
@@ -1130,6 +1147,7 @@ max_bit_rate = 0   # 0 = unlimited; set e.g. 320 to cap streaming bitrate
 # dynamic       = true         # extract accent colour from album art
 
 [ui]
+# album_art_backend = "kitty-legacy"   # default: "ratatui-image"; legacy Kitty APC + post-draw
 
 [ui.general]
 tab_bar_position = "bottom"

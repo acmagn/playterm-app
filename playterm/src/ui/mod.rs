@@ -1,4 +1,5 @@
 pub mod albums;
+pub mod art_prepare;
 pub mod artists;
 pub mod browser;
 pub mod home_tab;
@@ -35,13 +36,9 @@ pub fn render(app: &mut App, frame: &mut Frame) {
             render_home_tab(
                 frame,
                 areas.center,
-                &app.home,
-                &app.config,
+                app,
                 app.accent(),
-                app.kitty_supported,
                 app.help_visible,
-                app.cell_px,
-                &app.theme,
             );
             now_playing::render(app, frame, areas.now_playing);
             status_bar::render(app, frame, areas.status_bar);
