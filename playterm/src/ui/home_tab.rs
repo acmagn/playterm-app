@@ -312,10 +312,21 @@ fn render_art_strip_ratatui(
                 if let Ok(img) = image::load_from_memory(bytes) {
                     let img = if is_sixel {
                         let pad = crate::theme::color_to_rgba(app.theme.surface);
-                        // Same 1× cell pixel budget as NP — see `prepare_art_image_for_rect_contain_centered`.
-                        crate::ui::art_prepare::prepare_art_image_for_rect_contain_centered(
-                            img, thumb_rect, fs, pad,
-                        )
+                        let fw = fs.0 as u32;
+                        let fh = fs.1 as u32;
+                        let need_w = thumb_rect.width as u32 * fw;
+                        let need_h = thumb_rect.height as u32 * fh;
+                        if (need_w as u128).saturating_mul(need_h as u128)
+                            <= crate::ui::art_prepare::MAX_SIXEL_PREP_PIXELS
+                        {
+                            crate::ui::art_prepare::prepare_art_image_for_exact_pixels_contain_centered(
+                                img, need_w, need_h, pad,
+                            )
+                        } else {
+                            crate::ui::art_prepare::prepare_art_image_for_rect_contain_centered(
+                                img, thumb_rect, fs, pad,
+                            )
+                        }
                     } else {
                         crate::ui::art_prepare::prepare_art_image_for_strip(img, thumb_rect, fs)
                     };

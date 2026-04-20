@@ -475,6 +475,8 @@ async fn run_loop(
                                     placement,
                                     app.in_tmux,
                                     app.tmux_status_offset,
+                                    app.cell_px,
+                                    crate::theme::color_to_rgba(app.theme.surface),
                                 ) {
                                     Ok(()) => {
                                         last_rendered_art = Some((fp, placement));
@@ -530,6 +532,7 @@ async fn run_loop(
                         albums_inner.x,
                         albums_inner.y,
                         app.in_tmux,
+                        crate::theme::color_to_rgba(app.theme.surface),
                     );
                 }
                 app.home_art_needs_redraw = false;

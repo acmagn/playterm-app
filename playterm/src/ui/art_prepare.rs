@@ -5,12 +5,15 @@
 //! (“black bands”). We **center-crop** the cover to the cell aspect ratio first, then scale down
 //! inside the 1024 px budget, so the bitmap matches the widget area more closely.
 
-use image::{DynamicImage, ImageBuffer, Rgba, imageops::{self, FilterType}};
+use image::{DynamicImage, ImageBuffer, Rgba, RgbaImage, imageops::{self, FilterType}};
 use ratatui::layout::Rect;
 use ratatui_image::FontSize;
 
 /// Same cap as `kitty_art::render_image` (avoid huge protocol payloads).
 pub const MAX_ART_EDGE_PX: u32 = 1024;
+
+/// Guard for full-cell×font Sixel bitmaps (`inner × font`); above this, fall back to capped rect prep.
+pub const MAX_SIXEL_PREP_PIXELS: u128 = 12_000_000;
 
 /// Home Recently Played strip: encode covers at this multiple of the on-screen pixel budget.
 /// The widget still occupies the same `Rect` in cells; ratatui-image scales down for display,
@@ -72,13 +75,58 @@ pub fn prepare_art_image_for_rect(img: DynamicImage, rect: Rect, font: FontSize)
     fit_image_to_pixel_budget(img, max_w, max_h)
 }
 
-/// Fit the image **without cropping** into the cell pixel rectangle.
+/// Uniformly scale `w×h` down so `max(w,h) ≤ max_edge` (preserves aspect). No-op if already smaller.
+pub fn uniform_scale_dimensions_to_max_edge(w: u32, h: u32, max_edge: u32) -> (u32, u32) {
+    if w == 0 || h == 0 {
+        return (1, 1);
+    }
+    if w <= max_edge && h <= max_edge {
+        return (w, h);
+    }
+    let s = max_edge as f64 / w.max(h) as f64;
+    let nw = ((w as f64) * s).round() as u32;
+    let nh = ((h as f64) * s).round() as u32;
+    (nw.max(1), nh.max(1))
+}
+
+/// Sixel path uses `DynamicImage::to_rgb8()` in ratatui-image, which **drops alpha as black**.
+/// Some PNG covers have transparency; compositing onto `bg` makes letterboxing match the panel.
+fn flatten_rgba_onto_background(img: DynamicImage, bg: Rgba<u8>) -> DynamicImage {
+    let rgba = img.to_rgba8();
+    let (w, h) = (rgba.width(), rgba.height());
+    if w == 0 || h == 0 {
+        return DynamicImage::ImageRgba8(rgba);
+    }
+    let mut canvas: RgbaImage = ImageBuffer::from_pixel(w, h, bg);
+    imageops::overlay(&mut canvas, &rgba, 0, 0);
+    DynamicImage::ImageRgba8(canvas)
+}
+
+/// Contain-fit into `target_w×target_h`, then pad to that exact size (centered).
 ///
-/// This preserves the full cover (no top/bottom chop) at the cost of letterboxing.
-/// Useful for Sixel terminals where cropping looks especially bad in small strips.
-pub fn prepare_art_image_for_rect_contain(img: DynamicImage, rect: Rect, font: FontSize) -> DynamicImage {
-    let (max_w, max_h) = pixel_budget_for_rect(rect, font);
-    fit_image_to_pixel_budget(img, max_w, max_h)
+/// Used when the bitmap must match a physical pixel size exactly (Kitty placement aspect, or
+/// ratatui-image Sixel `desired` cells). **Do not** use `image::resize(w,h)` alone — it stretches.
+///
+/// Output is composited onto `pad` so alpha is never passed through to Sixel as spurious black.
+pub fn prepare_art_image_for_exact_pixels_contain_centered(
+    img: DynamicImage,
+    target_w: u32,
+    target_h: u32,
+    pad: Rgba<u8>,
+) -> DynamicImage {
+    let target_w = target_w.max(1);
+    let target_h = target_h.max(1);
+    let fitted = fit_image_to_pixel_budget(img, target_w, target_h);
+    let composed = if fitted.width() == target_w && fitted.height() == target_h {
+        fitted
+    } else {
+        let mut bg: DynamicImage = ImageBuffer::from_pixel(target_w, target_h, pad).into();
+        let x = (target_w.saturating_sub(fitted.width())) / 2;
+        let y = (target_h.saturating_sub(fitted.height())) / 2;
+        imageops::overlay(&mut bg, &fitted, x as i64, y as i64);
+        bg
+    };
+    flatten_rgba_onto_background(composed, pad)
 }
 
 /// Contain-fit into the cell pixel budget, then pad to **exact** `max_w × max_h` with `pad`.
@@ -91,22 +139,18 @@ pub fn prepare_art_image_for_rect_contain(img: DynamicImage, rect: Rect, font: F
 ///
 /// Without centered pad, `Resize::Scale` pads again with the picker background (often reads as a
 /// second letterbox on Sixel). Matching the panel surface here keeps one consistent matte.
+///
+/// For large widgets, prefer [`prepare_art_image_for_exact_pixels_contain_centered`] with
+/// `inner.width * font.0` × `inner.height * font.1` so `desired` cells match the widget (avoids
+/// top-left sixel placement and black bands).
 pub fn prepare_art_image_for_rect_contain_centered(
     img: DynamicImage,
     rect: Rect,
     font: FontSize,
     pad: Rgba<u8>,
 ) -> DynamicImage {
-    let fitted = prepare_art_image_for_rect_contain(img, rect, font);
     let (max_w, max_h) = pixel_budget_for_rect(rect, font);
-    if fitted.width() == max_w && fitted.height() == max_h {
-        return fitted;
-    }
-    let mut bg: DynamicImage = ImageBuffer::from_pixel(max_w, max_h, pad).into();
-    let x = (max_w.saturating_sub(fitted.width())) / 2;
-    let y = (max_h.saturating_sub(fitted.height())) / 2;
-    imageops::overlay(&mut bg, &fitted, x as i64, y as i64);
-    bg
+    prepare_art_image_for_exact_pixels_contain_centered(img, max_w, max_h, pad)
 }
 
 /// Like [`prepare_art_image_for_rect`], but targets **2×** the nominal strip pixel size (capped),

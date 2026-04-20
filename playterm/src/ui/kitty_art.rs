@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use std::io::{self, Write};
 
 use anyhow::Result;
+use image::Rgba;
 use ratatui::layout::Rect;
 use ratatui::widgets::{Block, BorderType, Borders};
 
@@ -200,10 +201,22 @@ pub fn album_art_placeholder_inner(outer: Rect) -> Rect {
 /// [`album_art_placeholder_inner`] applied to the same outer `Rect` as the ratatui placeholder.
 /// Coordinates are ratatui’s 0-based buffer positions; CSI cursor uses 1-based rows/cols.
 ///
+/// `cell_px` — terminal cell size in pixels (`CSI 16 t` or ratatui-image picker). `None` → 10×20.
+///
+/// `pad` letterboxes the cover so bitmap aspect matches the **physical** `c×r` cell grid; otherwise
+/// Kitty stretches a wrong-aspect bitmap to fill the placement.
+///
 /// When `in_tmux` is `false`: direct APC placement (`a=T` with `c=`/`r=`).
 ///
 /// When `in_tmux` is `true`: Unicode placeholder method (`a=t` + `a=p,U=1` + row diacritics).
-pub fn render_image(bytes: &[u8], placement: Rect, in_tmux: bool, tmux_status_offset: u16) -> Result<()> {
+pub fn render_image(
+    bytes: &[u8],
+    placement: Rect,
+    in_tmux: bool,
+    tmux_status_offset: u16,
+    cell_px: Option<(u16, u16)>,
+    pad: Rgba<u8>,
+) -> Result<()> {
     use base64::Engine;
     use flate2::Compression;
     use flate2::write::ZlibEncoder;
@@ -221,15 +234,17 @@ pub fn render_image(bytes: &[u8], placement: Rect, in_tmux: bool, tmux_status_of
         inner_h
     };
 
-    // Decode image from raw bytes.
-    let img = image::load_from_memory(bytes)?;
+    let place_rows = if in_tmux { tmux_rows } else { inner_h };
+    let fw = cell_px.map(|(w, _)| w as u32).filter(|&w| w > 0).unwrap_or(10);
+    let fh = cell_px.map(|(_, h)| h as u32).filter(|&h| h > 0).unwrap_or(20);
 
-    // Resize to fit the inner area.  We estimate 10 px per column, 20 px per row
-    // (a reasonable approximation for most terminals).  Cap at 1024 to avoid
-    // transferring enormous payloads on very large terminals.
-    let px_w = (inner_w as u32 * 10).min(1024);
-    let px_h = (if in_tmux { tmux_rows } else { inner_h } as u32 * 20).min(1024);
-    let img = img.resize(px_w, px_h, image::imageops::FilterType::Lanczos3);
+    let phys_w = inner_w as u32 * fw;
+    let phys_h = place_rows as u32 * fh;
+    let (tw, th) =
+        crate::ui::art_prepare::uniform_scale_dimensions_to_max_edge(phys_w, phys_h, crate::ui::art_prepare::MAX_ART_EDGE_PX);
+
+    let img = image::load_from_memory(bytes)?;
+    let img = crate::ui::art_prepare::prepare_art_image_for_exact_pixels_contain_centered(img, tw, th, pad);
     let img_rgba = img.to_rgba8();
     let (w, h) = img_rgba.dimensions();
     let raw = img_rgba.into_raw();
@@ -306,7 +321,7 @@ pub fn render_image(bytes: &[u8], placement: Rect, in_tmux: bool, tmux_status_of
                 write!(
                     out,
                     "{}",
-                    apc(&format!("a=T,f=32,i=1,s={w},v={h},c={inner_w},r={inner_h},o=z,m={m},q=2;{chunk_str}"), false)
+                    apc(&format!("a=T,f=32,i=1,s={w},v={h},c={inner_w},r={place_rows},o=z,m={m},q=2;{chunk_str}"), false)
                 )?;
             } else {
                 write!(out, "{}", apc(&format!("m={m};{chunk_str}"), false))?;
@@ -675,8 +690,9 @@ pub fn visible_thumbnail_count(terminal_cols: u16, thumb_cols: u16, gap_cols: u1
 /// Cached resize + zlib for one Home-strip thumbnail (Kitty image id is chosen per slot at draw time).
 #[derive(Debug, Clone)]
 pub struct StripThumbPrepared {
-    /// Edge length in pixels used when this payload was built (must match current strip).
-    pub thumb_px: u32,
+    /// Bitmap width/height when this payload was built (must match current strip geometry).
+    pub target_w: u32,
+    pub target_h: u32,
     pub img_w: u32,
     pub img_h: u32,
     /// Base64 of zlib-compressed RGBA — built once so tab redraws skip re-encoding.
@@ -684,21 +700,21 @@ pub struct StripThumbPrepared {
 }
 
 impl StripThumbPrepared {
-    pub fn matches_size(&self, thumb_px: u32) -> bool {
-        self.thumb_px == thumb_px
+    pub fn matches_size(&self, tw: u32, th: u32) -> bool {
+        self.target_w == tw && self.target_h == th
     }
 
-    /// Decode server cover bytes, resize for the strip, zlib-compress RGBA (same as Kitty `o=z`).
-    pub fn build(cover_bytes: &[u8], thumb_px: u32) -> Option<Self> {
+    /// Decode cover bytes, contain+letterbox to `tw×th` (matches `c×r` cell aspect), zlib RGBA.
+    pub fn build(cover_bytes: &[u8], tw: u32, th: u32, pad: Rgba<u8>) -> Option<Self> {
         use base64::Engine;
         use flate2::Compression;
         use flate2::write::ZlibEncoder;
-        use image::imageops::FilterType;
         use std::io::Write;
 
         let img = image::load_from_memory(cover_bytes).ok()?;
-        // Triangle is much cheaper than Lanczos3; strip thumbs are small so quality stays acceptable.
-        let img = img.resize_exact(thumb_px, thumb_px, FilterType::Triangle);
+        let img = crate::ui::art_prepare::prepare_art_image_for_exact_pixels_contain_centered(
+            img, tw, th, pad,
+        );
         let img_rgba = img.to_rgba8();
         let (w, h) = img_rgba.dimensions();
         let raw = img_rgba.into_raw();
@@ -708,7 +724,8 @@ impl StripThumbPrepared {
         let zlib_body = enc.finish().ok()?;
         let b64 = base64::engine::general_purpose::STANDARD.encode(&zlib_body);
         Some(Self {
-            thumb_px,
+            target_w: tw,
+            target_h: th,
             img_w: w,
             img_h: h,
             b64,
@@ -734,6 +751,7 @@ pub fn render_art_strip(
     terminal_col_offset: u16,
     terminal_row_offset: u16,
     in_tmux: bool,
+    pad: Rgba<u8>,
 ) {
     // Pre-clear previous art strip images/placements before drawing new ones.
     if in_tmux {
@@ -748,19 +766,16 @@ pub fn render_art_strip(
     let thumb_cols = layout.thumb_cols;
     let thumb_rows = layout.thumb_rows;
     let visible_count = layout.total_visible.min(KITTY_STRIP_MAX_SLOTS);
-    // Match bitmap edge length to the Kitty placement grid: one row of cells ≈ cell pixel height.
-    // When CSI 16 t is unavailable, fall back to 32 px/row (common default).
-    let px_per_row = cell_px
-        .map(|(_, h)| h as u32)
-        .filter(|&h| h > 0)
-        .unwrap_or(32);
-    // Nominal square edge ≈ cell height × row count; bump to **2×** (capped) so Kitty scales
-    // a sharper bitmap into the same c×r placement (same idea as `prepare_art_image_for_strip`).
-    let nominal = (thumb_rows as u32).saturating_mul(px_per_row);
-    let thumb_px = nominal
-        .saturating_mul(crate::ui::art_prepare::STRIP_ENCODE_SUPERRES)
-        .min(crate::ui::art_prepare::MAX_ART_EDGE_PX)
-        .max(nominal);
+    let fw = cell_px.map(|(w, _)| w as u32).filter(|&w| w > 0).unwrap_or(10);
+    let fh = cell_px.map(|(_, h)| h as u32).filter(|&h| h > 0).unwrap_or(20);
+    // Physical size of one thumb slot — bitmap aspect must match or Kitty stretches (square thumbs were wrong).
+    let phys_w = thumb_cols as u32 * fw;
+    let phys_h = thumb_rows as u32 * fh;
+    let (tw, th) = crate::ui::art_prepare::uniform_scale_dimensions_to_max_edge(
+        phys_w,
+        phys_h,
+        crate::ui::art_prepare::MAX_ART_EDGE_PX,
+    );
 
     for i in 0..visible_count {
         let album_index = scroll_offset + i;
@@ -779,8 +794,8 @@ pub fn render_art_strip(
 
         if let Some(bytes) = art_cache.get(album_id) {
             let prep = match prepared.remove(album_id) {
-                Some(p) if p.matches_size(thumb_px) => p,
-                _ => match StripThumbPrepared::build(bytes, thumb_px) {
+                Some(p) if p.matches_size(tw, th) => p,
+                _ => match StripThumbPrepared::build(bytes, tw, th, pad) {
                     Some(p) => p,
                     None => continue,
                 },

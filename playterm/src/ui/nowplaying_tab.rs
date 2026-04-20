@@ -219,7 +219,21 @@ fn sync_np_ratatui_protocol(app: &mut App, inner: Rect) {
     };
     let img = if matches!(picker.protocol_type(), ProtocolType::Sixel) {
         let pad = crate::theme::color_to_rgba(app.theme.surface);
-        crate::ui::art_prepare::prepare_art_image_for_rect_contain_centered(base_img, inner, fs, pad)
+        let fw = fs.0 as u32;
+        let fh = fs.1 as u32;
+        let need_w = inner.width as u32 * fw;
+        let need_h = inner.height as u32 * fh;
+        if (need_w as u128).saturating_mul(need_h as u128)
+            <= crate::ui::art_prepare::MAX_SIXEL_PREP_PIXELS
+        {
+            crate::ui::art_prepare::prepare_art_image_for_exact_pixels_contain_centered(
+                base_img, need_w, need_h, pad,
+            )
+        } else {
+            crate::ui::art_prepare::prepare_art_image_for_rect_contain_centered(
+                base_img, inner, fs, pad,
+            )
+        }
     } else {
         crate::ui::art_prepare::prepare_art_image_for_rect(base_img, inner, fs)
     };
@@ -243,6 +257,14 @@ fn render_art_placeholder(app: &mut App, frame: &mut Frame, area: Rect) {
     {
         let inner = crate::ui::kitty_art::album_art_placeholder_inner(area);
         if inner.width > 0 && inner.height > 0 {
+            if app.art_picker.as_ref().is_some_and(|p| {
+                matches!(p.protocol_type(), ProtocolType::Sixel)
+            }) {
+                frame.render_widget(
+                    Block::default().style(Style::default().bg(app.theme.surface)),
+                    inner,
+                );
+            }
             sync_np_ratatui_protocol(app, inner);
             let img_resize = app.ratatui_stateful_resize();
             if let Some(ref mut state) = app.np_art_state {
