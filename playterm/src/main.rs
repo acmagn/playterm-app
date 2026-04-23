@@ -1015,6 +1015,12 @@ fn map_key(
         if kb.home_refresh.matches(code, modifiers) {
             return Action::HomeRefresh;
         }
+        // Home: Ctrl+r (same bind as Browser replace-album) replaces the queue with the selected album.
+        if let Some(spec) = &kb.add_all_replace_album {
+            if spec.matches(code, modifiers) {
+                return Action::HomeAlbumPlay;
+            }
+        }
         if kb.column_left.matches(code, modifiers) {
             return Action::HomeAlbumLeft;
         }

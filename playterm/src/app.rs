@@ -1153,7 +1153,7 @@ impl App {
 
     /// Spawn a task to fetch all tracks for an album, then replace the queue
     /// and start playing (or just append, depending on `replace`).
-    pub fn fetch_and_replace_queue_with_album(&self, album_id: String, _start_playing: bool) {
+    pub fn fetch_and_replace_queue_with_album(&self, album_id: String, start_playing: bool) {
         let client = self.subsonic.clone();
         let tx = self.library_tx.clone();
         tokio::spawn(async move {
@@ -1164,7 +1164,7 @@ impl App {
                     let _ = tx
                         .send(LibraryUpdate::AllTracksForArtist {
                             songs,
-                            start_playing: true,
+                            start_playing,
                             prepend: false,
                         })
                         .await;
