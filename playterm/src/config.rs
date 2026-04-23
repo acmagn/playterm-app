@@ -248,7 +248,9 @@ pub struct UiNowPlayingSection {
     /// `row` = full-width three-column strip (default); `boxed` = bordered panel like Visualizer.
     #[serde(default)]
     pub layout: Option<String>,
-    /// When `layout` is `boxed`: dock under `queue` (default) or `art` (requires `show_art`).
+    /// When `layout` is `boxed`: dock the pane on `left` or `right`.
+    ///
+    /// Legacy values `art` / `queue` are still accepted (only meaningful when art is shown).
     #[serde(default)]
     pub box_location: Option<String>,
     /// Show transport controls (⇄ ⏮ ▶/⏸ ⏭ ↻).
@@ -275,9 +277,6 @@ pub struct UiNowPlayingSection {
     /// NowPlaying tab: album art column side. Use `left` or `right` (case-insensitive).
     #[serde(default)]
     pub art_position: Option<String>,
-    /// NowPlaying tab: album art column width percentage (1–99).
-    #[serde(default)]
-    pub art_width_percent: Option<u8>,
     /// If true, show a small fzf picker hint when the queue is empty (only when library fzf is enabled).
     #[serde(default)]
     pub show_fzf_hint: Option<bool>,
@@ -296,8 +295,15 @@ pub struct UiNpTabArtSection {
     pub show: Option<bool>,
     #[serde(default)]
     pub position: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct UiNpTabLayoutSection {
+    /// When the Now Playing tab is split into left/right columns, the left column width in percent (1–99).
+    ///
+    /// This replaces per-widget width percentages; it controls the left/right column split.
     #[serde(default)]
-    pub width_percent: Option<u8>,
+    pub left_width_percent: Option<u8>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
@@ -308,9 +314,21 @@ pub struct UiNpTabVisualizerSection {
     /// Start with the spectrum visualizer overlay visible (toggle `V`).
     #[serde(default)]
     pub visible: Option<bool>,
-    /// When open: `queue` or `art` (under queue column vs album-art column).
+    /// When open: `left` or `right`.
+    ///
+    /// Legacy values `art` / `queue` are still accepted (only meaningful when art is shown).
     #[serde(default)]
     pub location: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct UiNpTabQueueSection {
+    /// Queue column side on the Now Playing tab: `left` or `right`.
+    ///
+    /// If omitted, it defaults to the opposite of `[ui.nptab.art].position` (so art + queue form
+    /// two columns by default).
+    #[serde(default)]
+    pub position: Option<String>,
 }
 
 /// Now Playing tab: overrides for the bottom strip + boxed pane (see `[ui.row_now_playing]` for shared defaults).
@@ -320,6 +338,9 @@ pub struct UiNpTabNowPlayingSection {
     pub bar_height: Option<u16>,
     #[serde(default)]
     pub layout: Option<String>,
+    /// When `layout` is `boxed`: dock the pane on `left` or `right`.
+    ///
+    /// Legacy values `art` / `queue` are still accepted (only meaningful when art is shown).
     #[serde(default)]
     pub box_location: Option<String>,
     #[serde(default)]
@@ -419,6 +440,12 @@ pub struct UiNpTabSection {
     /// Album art settings for the Now Playing tab.
     #[serde(default)]
     pub art: Option<UiNpTabArtSection>,
+    /// Layout settings (column widths, etc.) for the Now Playing tab.
+    #[serde(default)]
+    pub layout: Option<UiNpTabLayoutSection>,
+    /// Queue column placement for the Now Playing tab.
+    #[serde(default)]
+    pub queue: Option<UiNpTabQueueSection>,
     /// Visualizer: feature toggle, startup visibility, pane docking.
     #[serde(default)]
     pub visualizer_pane: Option<UiNpTabVisualizerSection>,
@@ -474,9 +501,11 @@ pub struct UiSection {
     /// NowPlaying tab: album art column side. Use `left` or `right` (case-insensitive; default: left).
     #[serde(default = "default_ui_nowplaying_art_position")]
     pub nowplaying_art_position: String,
-    /// NowPlaying tab: album art column width percentage (1–99). Default: 50.
-    #[serde(default = "default_ui_nowplaying_art_width_percent")]
-    pub nowplaying_art_width_percent: u8,
+    /// NowPlaying tab: left column width percentage (1–99) when split.
+    ///
+    /// Preferred: configure under `[ui.nptab.layout].left_width_percent`.
+    #[serde(default = "default_ui_nowplaying_left_width_percent")]
+    pub nowplaying_left_width_percent: u8,
     /// If true, show a small fzf picker hint when the queue is empty (only when library fzf is enabled).
     /// Default: false.
     #[serde(default = "default_ui_show_fzf_hint")]
@@ -541,13 +570,13 @@ fn default_ui_visualizer_enabled() -> bool { true }
 fn default_ui_progress_style() -> String { "██░".into() }
 fn default_ui_nowplaying_show_art() -> bool { true }
 fn default_ui_nowplaying_art_position() -> String { "left".into() }
-fn default_ui_nowplaying_art_width_percent() -> u8 { 50 }
+fn default_ui_nowplaying_left_width_percent() -> u8 { 50 }
 fn default_ui_show_fzf_hint() -> bool { false }
 fn default_ui_visualizer_location() -> String { "queue".into() }
 fn default_ui_tab_bar_position() -> String { "bottom".into() }
 fn default_ui_now_playing_bar_height() -> u16 { 4 }
 fn default_ui_now_playing_layout() -> String { "row".into() }
-fn default_ui_now_playing_box_location() -> String { "queue".into() }
+fn default_ui_now_playing_box_location() -> String { "right".into() }
 fn default_ui_now_playing_show_controls() -> bool { true }
 fn default_ui_now_playing_show_progress() -> bool { true }
 
@@ -568,7 +597,7 @@ impl Default for UiSection {
             nowplaying_show_art: default_ui_nowplaying_show_art(),
             album_art_backend: AlbumArtBackend::default(),
             nowplaying_art_position: default_ui_nowplaying_art_position(),
-            nowplaying_art_width_percent: default_ui_nowplaying_art_width_percent(),
+            nowplaying_left_width_percent: default_ui_nowplaying_left_width_percent(),
             show_fzf_hint: default_ui_show_fzf_hint(),
             visualizer_location: default_ui_visualizer_location(),
             tab_bar_position: default_ui_tab_bar_position(),
@@ -737,8 +766,10 @@ pub struct Config {
     pub album_art_backend: AlbumArtBackend,
     /// NowPlaying tab: album art side ("left" or "right").
     pub nowplaying_art_position: String,
-    /// NowPlaying tab: album art width percentage.
-    pub nowplaying_art_width_percent: u8,
+    /// NowPlaying tab: queue side ("left" or "right").
+    pub nowplaying_queue_position: String,
+    /// NowPlaying tab: left column width percent when split (1–99).
+    pub nowplaying_left_width_percent: u8,
     /// Show fzf picker hints in the UI where relevant.
     pub show_fzf_hint: bool,
     /// Where the visualizer pane appears ("queue" or "art").
@@ -749,7 +780,7 @@ pub struct Config {
     pub now_playing_bar_height: u16,
     /// `row` or `boxed` now-playing layout.
     pub now_playing_layout: String,
-    /// `queue` or `art` — boxed pane dock (when layout is boxed).
+    /// Boxed Now Playing pane side (`left` or `right`).
     pub now_playing_box_location: String,
     pub now_playing_show_controls: bool,
     pub now_playing_show_progress: bool,
@@ -842,11 +873,22 @@ impl Config {
             .or_else(|| legacy_np.and_then(|n| n.art_position.clone()))
             .unwrap_or_else(|| ui.nowplaying_art_position.clone());
 
-        let nowplaying_art_width_percent = nptab
-            .and_then(|n| n.art.as_ref())
-            .and_then(|a| a.width_percent)
-            .or_else(|| legacy_np.and_then(|n| n.art_width_percent))
-            .unwrap_or(ui.nowplaying_art_width_percent);
+        let nowplaying_queue_position = nptab
+            .and_then(|n| n.queue.as_ref())
+            .and_then(|q| q.position.clone())
+            .unwrap_or_else(|| {
+                if nowplaying_art_position.trim().eq_ignore_ascii_case("right") {
+                    "left".into()
+                } else {
+                    "right".into()
+                }
+            });
+
+        let nowplaying_left_width_percent = nptab
+            .and_then(|n| n.layout.as_ref())
+            .and_then(|l| l.left_width_percent)
+            .unwrap_or(ui.nowplaying_left_width_percent)
+            .clamp(1, 99);
 
         let show_fzf_hint = nptab
             .and_then(|n| n.show_fzf_hint)
@@ -883,7 +925,6 @@ impl Config {
         let now_playing_box_location = nptab
             .and_then(|n| n.now_playing.as_ref())
             .and_then(|l| l.box_location.clone())
-            .or_else(|| row.and_then(|r| r.box_location.clone()))
             .or_else(|| legacy_np.and_then(|n| n.box_location.clone()))
             .unwrap_or_else(|| ui.now_playing_box_location.clone());
 
@@ -1010,7 +1051,8 @@ impl Config {
             nowplaying_show_art,
             album_art_backend: ui.album_art_backend,
             nowplaying_art_position,
-            nowplaying_art_width_percent,
+            nowplaying_queue_position,
+            nowplaying_left_width_percent,
             show_fzf_hint,
             visualizer_location,
             tab_bar_position,
@@ -1155,7 +1197,7 @@ tab_bar_position = "bottom"
 [ui.row_now_playing]
 bar_height = 4
 layout = "row"
-box_location = "queue"
+box_location = "right"
 show_controls = true
 show_progress = true
 box_include_controls = false
@@ -1183,12 +1225,11 @@ lyrics = false
 [ui.nptab.art]
 show = true
 position = "left"
-width_percent = 50
 
 [ui.nptab.visualizer_pane]
 enabled = true
 visible = false
-location = "queue"
+location = "right"
 
 [ui.nptab.now_playing]
 # Overrides `row_now_playing` for the Now Playing tab (strip + boxed pane text).

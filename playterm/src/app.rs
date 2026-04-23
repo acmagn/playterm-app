@@ -2228,14 +2228,43 @@ impl App {
             Action::HomeAlbumLeft => {
                 if self.active_tab == Tab::Home {
                     if self.home.active_section == HomeSection::RecentAlbums {
-                        if self.home.album_selected_index > 0 {
-                            self.home.album_selected_index -= 1;
+                        if !self.config.home_recent_albums_show_art {
+                            // No-art list mode: h = up.
+                            self.home.album_selected_index = self.home.album_selected_index.saturating_sub(1);
                             if self.home.album_selected_index < self.home.album_scroll_offset {
                                 self.home.album_scroll_offset = self.home.album_selected_index;
                             }
-                            if !self.in_tmux {
-                                self.home_art_needs_redraw = true;
-                            }
+                            return;
+                        }
+                        if self.home.recent_albums.is_empty() {
+                            return;
+                        }
+                        let max_idx = self.home.recent_albums.len().saturating_sub(1);
+                        let per_row = self
+                            .home_recent_albums_inner
+                            .map(|inner| crate::ui::kitty_art::art_strip_layout(inner.width, inner.height).per_row)
+                            .unwrap_or(1)
+                            .max(1);
+
+                        // Only move within the current visible row (no wrapping).
+                        let rel = self.home.album_selected_index.saturating_sub(self.home.album_scroll_offset);
+                        let col = rel % per_row;
+                        if col == 0 {
+                            return;
+                        }
+                        self.home.album_selected_index = self.home.album_selected_index.saturating_sub(1);
+
+                        // Ensure still visible (row-step scroll).
+                        if self.home.album_selected_index < self.home.album_scroll_offset {
+                            let diff = self.home.album_scroll_offset - self.home.album_selected_index;
+                            let rows = (diff + per_row - 1) / per_row;
+                            self.home.album_scroll_offset =
+                                self.home.album_scroll_offset.saturating_sub(rows * per_row);
+                        }
+                        self.home.album_scroll_offset = self.home.album_scroll_offset.min(max_idx);
+
+                        if !self.in_tmux {
+                            self.home_art_needs_redraw = true;
                         }
                     } else {
                         // In bottom panes: h escapes to previous section.
@@ -2247,17 +2276,62 @@ impl App {
             Action::HomeAlbumRight => {
                 if self.active_tab == Tab::Home {
                     if self.home.active_section == HomeSection::RecentAlbums {
-                        let max_idx = self.home.recent_albums.len().saturating_sub(1);
-                        if self.home.album_selected_index < max_idx {
-                            self.home.album_selected_index += 1;
-                            let visible_count = self.home_album_strip_visible_count();
-                            let scroll_end = self.home.album_scroll_offset + visible_count.saturating_sub(1);
+                        if !self.config.home_recent_albums_show_art {
+                            // No-art list mode: l = down.
+                            let max_idx = self.home.recent_albums.len().saturating_sub(1);
+                            self.home.album_selected_index =
+                                (self.home.album_selected_index + 1).min(max_idx);
+                            let visible_rows = self
+                                .home_recent_albums_inner
+                                .map(|r| r.height as usize)
+                                .unwrap_or(8)
+                                .max(1);
+                            let scroll_end =
+                                self.home.album_scroll_offset + visible_rows.saturating_sub(1);
                             if self.home.album_selected_index > scroll_end {
-                                self.home.album_scroll_offset += 1;
+                                self.home.album_scroll_offset =
+                                    self.home.album_scroll_offset.saturating_add(1);
                             }
-                            if !self.in_tmux {
-                                self.home_art_needs_redraw = true;
-                            }
+                            return;
+                        }
+                        let max_idx = self.home.recent_albums.len().saturating_sub(1);
+                        if self.home.recent_albums.is_empty() {
+                            return;
+                        }
+                        let per_row = self
+                            .home_recent_albums_inner
+                            .map(|inner| crate::ui::kitty_art::art_strip_layout(inner.width, inner.height).per_row)
+                            .unwrap_or(1)
+                            .max(1);
+                        let visible_count = self.home_album_strip_visible_count().max(1);
+
+                        let rel = self.home.album_selected_index.saturating_sub(self.home.album_scroll_offset);
+                        let row = rel / per_row;
+                        let col = rel % per_row;
+                        let row_end_rel = row * per_row + (per_row - 1);
+                        // Can't move right past the row end or past data end.
+                        if col + 1 >= per_row || self.home.album_selected_index >= max_idx {
+                            return;
+                        }
+                        // Also avoid stepping into a non-visible slot in a short last row.
+                        let candidate_rel = rel + 1;
+                        if candidate_rel > row_end_rel {
+                            return;
+                        }
+
+                        self.home.album_selected_index += 1;
+
+                        // Ensure still visible (row-step scroll).
+                        let end = self.home.album_scroll_offset + visible_count.saturating_sub(1);
+                        if self.home.album_selected_index > end {
+                            let diff = self.home.album_selected_index - end;
+                            let rows = (diff + per_row - 1) / per_row;
+                            self.home.album_scroll_offset += rows * per_row;
+                        }
+                        self.home.album_scroll_offset = self.home.album_scroll_offset.min(max_idx);
+
+                        if !self.in_tmux {
+                            self.home_art_needs_redraw = true;
                         }
                     } else {
                         // In bottom panes: l escapes to next section.
@@ -2420,17 +2494,105 @@ impl App {
 
     fn handle_navigate_home(&mut self, dir: Direction) {
         if self.home.active_section == HomeSection::RecentAlbums {
-            // j/k in the album strip: move to next/prev section.
+            if !self.config.home_recent_albums_show_art {
+                // No-art list mode: j/k navigate the album list vertically.
+                if self.home.recent_albums.is_empty() {
+                    return;
+                }
+                let max_idx = self.home.recent_albums.len().saturating_sub(1);
+                let visible_rows = self
+                    .home_recent_albums_inner
+                    .map(|r| r.height as usize)
+                    .unwrap_or(8)
+                    .max(1);
+                match dir {
+                    Direction::Up | Direction::Top => {
+                        self.home.album_selected_index =
+                            self.home.album_selected_index.saturating_sub(1);
+                        if self.home.album_selected_index < self.home.album_scroll_offset {
+                            self.home.album_scroll_offset = self.home.album_selected_index;
+                        }
+                    }
+                    Direction::Down | Direction::Bottom => {
+                        self.home.album_selected_index =
+                            (self.home.album_selected_index + 1).min(max_idx);
+                        let scroll_end =
+                            self.home.album_scroll_offset + visible_rows.saturating_sub(1);
+                        if self.home.album_selected_index > scroll_end {
+                            self.home.album_scroll_offset =
+                                self.home.album_scroll_offset.saturating_add(1);
+                        }
+                    }
+                    Direction::PageUp => {
+                        self.home.album_selected_index =
+                            self.home.album_selected_index.saturating_sub(visible_rows);
+                        self.home.album_scroll_offset =
+                            self.home.album_scroll_offset.min(self.home.album_selected_index);
+                    }
+                    Direction::PageDown => {
+                        self.home.album_selected_index =
+                            (self.home.album_selected_index + visible_rows).min(max_idx);
+                        let scroll_end =
+                            self.home.album_scroll_offset + visible_rows.saturating_sub(1);
+                        if self.home.album_selected_index > scroll_end {
+                            self.home.album_scroll_offset = self
+                                .home.album_selected_index
+                                .saturating_sub(visible_rows.saturating_sub(1));
+                        }
+                    }
+                }
+                return;
+            }
+
+            // Art-strip mode: 2D-ish navigation on the visible grid.
+            // - j/k: move up/down one thumbnail row (±per_row)
+            // - h/l: move left/right one column (handled by HomeAlbumLeft/Right)
+            let max_idx = self.home.recent_albums.len().saturating_sub(1);
+            if self.home.recent_albums.is_empty() {
+                return;
+            }
+            let per_row = self
+                .home_recent_albums_inner
+                .map(|inner| crate::ui::kitty_art::art_strip_layout(inner.width, inner.height).per_row)
+                .unwrap_or(1)
+                .max(1);
+            let visible_count = self.home_album_strip_visible_count().max(1);
+
+            let step = match dir {
+                Direction::PageUp | Direction::PageDown => visible_count,
+                _ => per_row,
+            };
+
+            let mut new_sel = self.home.album_selected_index;
             match dir {
-                Direction::Down | Direction::Bottom => {
-                    self.home.active_section = self.home.active_section.next();
-                    self.home.selected_index = 0;
+                Direction::Up | Direction::Top | Direction::PageUp => {
+                    new_sel = new_sel.saturating_sub(step);
                 }
-                Direction::Up | Direction::Top => {
-                    self.home.active_section = self.home.active_section.prev();
-                    self.home.selected_index = 0;
+                Direction::Down | Direction::Bottom | Direction::PageDown => {
+                    new_sel = (new_sel + step).min(max_idx);
                 }
-                Direction::PageUp | Direction::PageDown => {}
+            }
+            self.home.album_selected_index = new_sel;
+
+            // Keep selection visible by adjusting scroll in row-sized steps.
+            let vis = visible_count;
+            let mut off = self.home.album_scroll_offset;
+            if self.home.album_selected_index < off {
+                let diff = off - self.home.album_selected_index;
+                let rows = (diff + per_row - 1) / per_row;
+                off = off.saturating_sub(rows * per_row);
+            } else {
+                let end = off + vis.saturating_sub(1);
+                if self.home.album_selected_index > end {
+                    let diff = self.home.album_selected_index - end;
+                    let rows = (diff + per_row - 1) / per_row;
+                    off = off.saturating_add(rows * per_row);
+                }
+            }
+            self.home.album_scroll_offset = off.min(max_idx);
+
+            if !self.in_tmux {
+                self.home_art_needs_redraw = true;
             }
             return;
         }

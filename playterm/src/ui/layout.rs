@@ -2,6 +2,276 @@ use ratatui::layout::{Constraint, Direction, Layout, Rect};
 
 use crate::app::{App, Tab};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Side {
+    Left,
+    Right,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Placement {
+    Left,
+    Right,
+    Full,
+}
+
+pub fn placement_from_str(s: &str) -> Option<Placement> {
+    let s = s.trim();
+    if s.eq_ignore_ascii_case("left") {
+        return Some(Placement::Left);
+    }
+    if s.eq_ignore_ascii_case("right") {
+        return Some(Placement::Right);
+    }
+    if s.eq_ignore_ascii_case("full") {
+        return Some(Placement::Full);
+    }
+    None
+}
+
+pub fn side_from_placement(p: Placement) -> Option<Side> {
+    match p {
+        Placement::Left => Some(Side::Left),
+        Placement::Right => Some(Side::Right),
+        Placement::Full => None,
+    }
+}
+
+/// Core Now Playing tab horizontal split: returns `(left_col, right_col)`.
+///
+/// - When `split` is false, right has full width and left is zero.
+/// - When `split` is true, `left_width_percent` controls the left column width.
+pub fn now_playing_split_lr(center: Rect, split: bool, left_width_percent: u8) -> (Rect, Rect) {
+    if !split {
+        return (Rect::new(center.x, center.y, 0, center.height), center);
+    }
+    let left_w = left_width_percent.clamp(1, 99);
+    let right_w = 100u8.saturating_sub(left_w).max(1);
+    let cols = Layout::horizontal([
+        Constraint::Percentage(left_w.into()),
+        Constraint::Percentage(right_w.into()),
+    ])
+    .split(center);
+    (cols[0], cols[1])
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NowPlayingRects {
+    pub art: Option<Rect>,
+    pub queue: Option<Rect>,
+    pub visualizer: Option<Rect>,
+    pub now_playing: Option<Rect>,
+    pub lyrics: Option<Rect>,
+}
+
+fn split_vertical_equal(area: Rect, parts: usize) -> Vec<Rect> {
+    if parts == 0 {
+        return vec![];
+    }
+    let pct = (100 / parts).max(1) as u16;
+    let mut cs = Vec::with_capacity(parts);
+    for _ in 0..parts {
+        cs.push(Constraint::Percentage(pct));
+    }
+    Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(cs)
+        .split(area)
+        .to_vec()
+}
+
+fn split_main_and_docks(area: Rect, dock_count: usize) -> (Rect, Vec<Rect>) {
+    match dock_count {
+        0 => (area, vec![]),
+        1 => {
+            let rows = Layout::vertical([Constraint::Percentage(75), Constraint::Percentage(25)])
+                .split(area);
+            (rows[0], vec![rows[1]])
+        }
+        _ => {
+            let rows = Layout::vertical([
+                Constraint::Percentage(50),
+                Constraint::Percentage(25),
+                Constraint::Percentage(25),
+            ])
+            .split(area);
+            (rows[0], vec![rows[1], rows[2]])
+        }
+    }
+}
+
+/// Unified Now Playing tab rect computation for rendering + hit-testing + kitty art placement.
+pub fn now_playing_rects(
+    center: Rect,
+    show_art: bool,
+    art_position: Placement,
+    queue_position: Placement,
+    left_width_percent: u8,
+    visualizer_visible: bool,
+    visualizer_position: Placement,
+    lyrics_visible: bool,
+    boxed_layout: bool,
+    now_playing_position: Placement,
+) -> NowPlayingRects {
+    let art_pos = if show_art { Some(art_position) } else { None };
+    let queue_pos = Some(queue_position);
+    let vz_pos = if visualizer_visible {
+        Some(visualizer_position)
+    } else {
+        None
+    };
+    let np_pos = if boxed_layout {
+        Some(now_playing_position)
+    } else {
+        None
+    };
+
+    let art_side = art_pos.and_then(side_from_placement);
+    let queue_side = queue_pos.and_then(side_from_placement);
+    let vz_side = vz_pos.and_then(side_from_placement);
+    let np_side = np_pos.and_then(side_from_placement);
+
+    // "Full" means "span horizontally (full-width row)", not "take over everything".
+    // We implement this by reserving full-width dock rows at the bottom for dock panes, and
+    // full-width main rows at the top for art/queue when configured.
+    let vz_full = vz_pos == Some(Placement::Full);
+    let np_full = np_pos == Some(Placement::Full);
+    let art_full = art_pos == Some(Placement::Full);
+    let queue_full = queue_pos == Some(Placement::Full);
+
+    // Full-width dock rows (visualizer / lyrics / now-playing).
+    let dock_full_count = usize::from(vz_full)
+        + usize::from(np_full)
+        + usize::from(lyrics_visible && !visualizer_visible && queue_full);
+
+    let (main_area, dock_full_rows) = split_main_and_docks(center, dock_full_count);
+
+    let uses_left = queue_side == Some(Side::Left)
+        || art_side == Some(Side::Left)
+        || vz_side == Some(Side::Left)
+        || np_side == Some(Side::Left);
+    let uses_right = queue_side == Some(Side::Right)
+        || art_side == Some(Side::Right)
+        || vz_side == Some(Side::Right)
+        || np_side == Some(Side::Right);
+    let split = uses_left && uses_right;
+
+    let mut rects = NowPlayingRects::default();
+
+    // Assign full-width dock panes in a stable bottom-dock order.
+    // Order: visualizer, lyrics, now-playing.
+    let mut dock_iter = dock_full_rows.into_iter();
+    if vz_full {
+        rects.visualizer = dock_iter.next();
+    }
+    if lyrics_visible && !visualizer_visible && queue_full {
+        rects.lyrics = dock_iter.next();
+    }
+    if np_full {
+        rects.now_playing = dock_iter.next();
+    }
+
+    // Main area may also contain full-width rows (art/queue) above the column layout.
+    let full_main_count = usize::from(art_full) + usize::from(queue_full);
+    // Even when `show_art` is false (no `art_side`), we may still have left/right panes
+    // (visualizer / now-playing) that need space below a full-width queue row.
+    let has_column_main = (!art_full && art_side.is_some())
+        || (!queue_full && queue_side.is_some())
+        || vz_side.is_some() && !vz_full
+        || np_side.is_some() && !np_full
+        || (lyrics_visible && !visualizer_visible && queue_side.is_some());
+    let top_parts = full_main_count + usize::from(has_column_main);
+    let main_parts = split_vertical_equal(main_area, top_parts.max(1));
+    let mut idx = 0usize;
+    if art_full {
+        rects.art = Some(main_parts[idx]);
+        idx += 1;
+    }
+    if queue_full {
+        rects.queue = Some(main_parts[idx]);
+        idx += 1;
+    }
+    let column_area = if has_column_main {
+        main_parts[idx]
+    } else {
+        // Nothing else; all main area already consumed.
+        Rect::new(main_area.x, main_area.y, 0, 0)
+    };
+
+    let mut render_side = |side: Side, col: Rect| {
+        let has_queue = queue_side == Some(side);
+        let has_art = art_side == Some(side);
+        let has_vz = vz_side == Some(side) && !vz_full;
+        let has_np = np_side == Some(side) && !np_full;
+        let has_lyrics = lyrics_visible && !visualizer_visible && has_queue;
+
+        let docks = u16::from(has_vz) + u16::from(has_np) + u16::from(has_lyrics);
+
+        // If there's exactly one thing on this side, let it fill vertically.
+        let total_things = u16::from(has_queue) + u16::from(has_art) + docks;
+        if total_things == 1 {
+            if has_art {
+                rects.art = Some(col);
+            } else if has_queue {
+                rects.queue = Some(col);
+            } else if has_vz {
+                rects.visualizer = Some(col);
+            } else if has_np {
+                rects.now_playing = Some(col);
+            } else if has_lyrics {
+                rects.lyrics = Some(col);
+            }
+            return;
+        }
+
+        // Multiple widgets on this side: stack them vertically with equal-ish shares.
+        // Avoid nested 75/25 splits (they collapse badly when heights are small).
+        let parts = usize::from(has_art)
+            + usize::from(has_queue)
+            + usize::from(has_vz)
+            + usize::from(has_np)
+            + usize::from(has_lyrics);
+        let rows = split_vertical_equal(col, parts.max(1));
+        let mut i = 0usize;
+
+        if has_art {
+            rects.art = Some(rows[i]);
+            i += 1;
+        }
+        if has_queue {
+            rects.queue = Some(rows[i]);
+            i += 1;
+        }
+        if has_vz {
+            rects.visualizer = Some(rows[i]);
+            i += 1;
+        }
+        if has_lyrics {
+            rects.lyrics = Some(rows[i]);
+            i += 1;
+        }
+        if has_np {
+            rects.now_playing = Some(rows[i]);
+        }
+    };
+
+    if split {
+        let (l, r) = now_playing_split_lr(column_area, true, left_width_percent);
+        render_side(Side::Left, l);
+        render_side(Side::Right, r);
+    } else {
+        // Single column: everything shares the full center.
+        let anchor_side = art_side
+            .or(vz_side)
+            .or(np_side)
+            .or(queue_side)
+            .unwrap_or(Side::Right);
+        render_side(anchor_side, column_area);
+    }
+
+    rects
+}
+
 /// Options for [`build_layout`]: tab strip position and now-playing bar height.
 #[derive(Debug, Clone, Copy)]
 pub struct LayoutOptions {
@@ -126,284 +396,4 @@ pub fn layout_options_for_app(app: &App) -> LayoutOptions {
     base
 }
 
-/// Split the Now Playing tab **center** into `(art column, queue column)`.
-/// When `show_art` is false, art has zero width and the queue uses the full center.
-pub fn now_playing_split_columns(
-    center: Rect,
-    show_art: bool,
-    art_width_percent: u8,
-    art_position_right: bool,
-) -> (Rect, Rect) {
-    if !show_art {
-        return (Rect::new(center.x, center.y, 0, center.height), center);
-    }
-
-    let art_w = art_width_percent.clamp(1, 99);
-    let queue_w = 100u8.saturating_sub(art_w).max(1);
-    let cols = Layout::horizontal([
-        Constraint::Percentage(art_w.into()),
-        Constraint::Percentage(queue_w.into()),
-    ])
-    .split(center);
-
-    if art_position_right {
-        (cols[1], cols[0])
-    } else {
-        (cols[0], cols[1])
-    }
-}
-
-/// Bottom dock rect for boxed now playing (same vertical share as Visualizer: 25% of a column).
-///
-/// `viz_under_art` — visualizer is visible **and** `[ui].visualizer_location` is `art` **and** `show_art`.
-/// `np_under_art` — layout is boxed **and** `[ui].now_playing_box_location` is `art` **and** `show_art`.
-/// `None` when not using boxed layout, or when lyrics hide the center pane.
-pub fn now_playing_boxed_pane_rect(
-    center: Rect,
-    show_art: bool,
-    art_width_percent: u8,
-    art_position_right: bool,
-    lyrics_visible: bool,
-    visualizer_visible: bool,
-    viz_under_art: bool,
-    boxed_layout: bool,
-    np_under_art: bool,
-) -> Option<Rect> {
-    if !boxed_layout || lyrics_visible {
-        return None;
-    }
-
-    let (art_col, queue_col) =
-        now_playing_split_columns(center, show_art, art_width_percent, art_position_right);
-
-    if visualizer_visible && boxed_layout {
-        if viz_under_art && np_under_art {
-            if art_col.width == 0 {
-                return None;
-            }
-            let rows = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Percentage(50),
-                    Constraint::Percentage(25),
-                    Constraint::Percentage(25),
-                ])
-                .split(art_col);
-            return Some(rows[2]);
-        }
-        if viz_under_art && !np_under_art {
-            let rows = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Percentage(75),
-                    Constraint::Percentage(25),
-                ])
-                .split(queue_col);
-            return Some(rows[1]);
-        }
-        if !viz_under_art && np_under_art {
-            if art_col.width == 0 {
-                return None;
-            }
-            let rows = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Percentage(75),
-                    Constraint::Percentage(25),
-                ])
-                .split(art_col);
-            return Some(rows[1]);
-        }
-        let rows = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Percentage(50),
-                Constraint::Percentage(25),
-                Constraint::Percentage(25),
-            ])
-            .split(queue_col);
-        return Some(rows[2]);
-    }
-
-    if np_under_art {
-        if art_col.width == 0 {
-            return None;
-        }
-        let rows = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Percentage(75),
-                Constraint::Percentage(25),
-            ])
-            .split(art_col);
-        return Some(rows[1]);
-    }
-
-    let rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Percentage(75),
-            Constraint::Percentage(25),
-        ])
-        .split(queue_col);
-    Some(rows[1])
-}
-
-/// Queue list area on the Now Playing tab: matches `nowplaying_tab::render`.
-pub fn now_playing_queue_widget_rect(
-    center: Rect,
-    show_art: bool,
-    art_width_percent: u8,
-    art_position_right: bool,
-    lyrics_visible: bool,
-    visualizer_visible: bool,
-    viz_under_art: bool,
-    boxed_layout: bool,
-    np_under_art: bool,
-) -> Rect {
-    let (_, queue_col) =
-        now_playing_split_columns(center, show_art, art_width_percent, art_position_right);
-
-    if lyrics_visible {
-        let rows = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Percentage(75),
-                Constraint::Percentage(25),
-            ])
-            .split(queue_col);
-        return rows[0];
-    }
-
-    if visualizer_visible && boxed_layout {
-        if viz_under_art && np_under_art {
-            return queue_col;
-        }
-        if viz_under_art && !np_under_art {
-            let rows = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Percentage(75),
-                    Constraint::Percentage(25),
-                ])
-                .split(queue_col);
-            return rows[0];
-        }
-        if !viz_under_art && np_under_art {
-            let rows = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Percentage(75),
-                    Constraint::Percentage(25),
-                ])
-                .split(queue_col);
-            return rows[0];
-        }
-        let rows = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Percentage(50),
-                Constraint::Percentage(25),
-                Constraint::Percentage(25),
-            ])
-            .split(queue_col);
-        return rows[0];
-    }
-
-    if visualizer_visible && !boxed_layout {
-        if !viz_under_art {
-            let rows = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Percentage(75),
-                    Constraint::Percentage(25),
-                ])
-                .split(queue_col);
-            return rows[0];
-        }
-        return queue_col;
-    }
-
-    if boxed_layout && !visualizer_visible {
-        if np_under_art {
-            return queue_col;
-        }
-        let rows = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Percentage(75),
-                Constraint::Percentage(25),
-            ])
-            .split(queue_col);
-        return rows[0];
-    }
-
-    queue_col
-}
-
-/// Kitty album-art placement: top segment of the art column only, so the image never covers
-/// the visualizer or boxed now-playing dock below it.
-pub fn now_playing_album_art_rect(
-    terminal_size: Rect,
-    layout_opts: &LayoutOptions,
-    show_art: bool,
-    art_width_percent: u8,
-    art_position_right: bool,
-    visualizer_visible: bool,
-    viz_under_art: bool,
-    boxed_layout: bool,
-    np_under_art: bool,
-) -> Option<Rect> {
-    if !show_art {
-        return None;
-    }
-
-    let areas = build_layout(terminal_size, layout_opts);
-    let center = areas.center;
-    let (art_col, _) = now_playing_split_columns(
-        center,
-        show_art,
-        art_width_percent,
-        art_position_right,
-    );
-
-    if art_col.width == 0 {
-        return None;
-    }
-
-    if boxed_layout && np_under_art && visualizer_visible && viz_under_art {
-        let rows = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Percentage(50),
-                Constraint::Percentage(25),
-                Constraint::Percentage(25),
-            ])
-            .split(art_col);
-        return Some(rows[0]);
-    }
-
-    if visualizer_visible && viz_under_art {
-        let rows = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Percentage(75),
-                Constraint::Percentage(25),
-            ])
-            .split(art_col);
-        return Some(rows[0]);
-    }
-
-    if boxed_layout && np_under_art {
-        let rows = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Percentage(75),
-                Constraint::Percentage(25),
-            ])
-            .split(art_col);
-        return Some(rows[0]);
-    }
-
-    Some(art_col)
-}
+// (Old specialized Now Playing rect helpers removed: use `now_playing_rects` instead.)

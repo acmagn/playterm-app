@@ -86,7 +86,7 @@ tab_bar_position = "bottom"
 [ui.row_now_playing]
 bar_height = 4
 layout = "row"
-box_location = "queue"
+box_location = "right"
 show_controls = true
 show_progress = true
 box_include_controls = false
@@ -121,16 +121,24 @@ show_fzf_hint = false
 [ui.nptab.art]
 show = true
 position = "left"
-width_percent = 50
+
+[ui.nptab.layout]
+# When split into left/right columns, this controls the left column width.
+left_width_percent = 50
+
+[ui.nptab.queue]
+# Queue column side on the Now Playing tab. Default (when omitted): opposite of `art.position`.
+position = "right"
 
 [ui.nptab.visualizer_pane]
 enabled = true
 visible = false
-location = "queue"
+location = "right"
 
 [ui.nptab.now_playing]
 # Overrides `[ui.row_now_playing]` on the Now Playing tab (strip layout + boxed pane `lines` / `progress_style`).
 # layout = "boxed"
+# box_location = "right"
 # lines = ["$b$1%t$/b$9", "$2%a$9", "$3%b$9"]
 
 [library]

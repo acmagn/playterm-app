@@ -1,5 +1,5 @@
 use ratatui::Frame;
-use ratatui::layout::{Alignment, Constraint, Layout, Rect};
+use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
@@ -20,147 +20,42 @@ pub fn render(app: &mut App, frame: &mut Frame, area: Rect) {
         .trim()
         .eq_ignore_ascii_case("boxed");
     let show_art = app.config.nowplaying_show_art;
-    let vz_under_art = app.visualizer_visible
-        && app
-            .config
-            .visualizer_location
-            .trim()
-            .eq_ignore_ascii_case("art")
-        && show_art;
-    let np_under_art = boxed
-        && app
-            .config
-            .now_playing_box_location
-            .trim()
-            .eq_ignore_ascii_case("art")
-        && show_art;
+    let art_position = super::layout::placement_from_str(&app.config.nowplaying_art_position)
+        .unwrap_or(super::layout::Placement::Left);
+    let queue_position = super::layout::placement_from_str(&app.config.nowplaying_queue_position)
+        .unwrap_or(super::layout::Placement::Right);
+    let visualizer_position = super::layout::placement_from_str(&app.config.visualizer_location)
+        .unwrap_or(super::layout::Placement::Right);
+    let now_playing_position = super::layout::placement_from_str(&app.config.now_playing_box_location)
+        .unwrap_or(super::layout::Placement::Right);
 
-    let (art_col, queue_col) = super::layout::now_playing_split_columns(
+    let rects = super::layout::now_playing_rects(
         area,
         show_art,
-        app.config.nowplaying_art_width_percent,
-        app.config
-            .nowplaying_art_position
-            .trim()
-            .eq_ignore_ascii_case("right"),
+        art_position,
+        queue_position,
+        app.config.nowplaying_left_width_percent,
+        app.visualizer_visible,
+        visualizer_position,
+        app.lyrics_visible,
+        boxed,
+        now_playing_position,
     );
 
-    if app.visualizer_visible {
-        if boxed {
-            if vz_under_art && np_under_art {
-                let rows = Layout::vertical([
-                    Constraint::Percentage(50),
-                    Constraint::Percentage(25),
-                    Constraint::Percentage(25),
-                ])
-                .split(art_col);
-                render_art_placeholder(app, frame, rows[0]);
-                queue::render(app, frame, queue_col, true);
-                render_visualizer_pane(app, frame, rows[1]);
-                now_playing::render_boxed_pane(app, frame, rows[2]);
-            } else if vz_under_art && !np_under_art {
-                let art_rows = Layout::vertical([
-                    Constraint::Percentage(75),
-                    Constraint::Percentage(25),
-                ])
-                .split(art_col);
-                let queue_rows = Layout::vertical([
-                    Constraint::Percentage(75),
-                    Constraint::Percentage(25),
-                ])
-                .split(queue_col);
-                render_art_placeholder(app, frame, art_rows[0]);
-                render_visualizer_pane(app, frame, art_rows[1]);
-                queue::render(app, frame, queue_rows[0], true);
-                now_playing::render_boxed_pane(app, frame, queue_rows[1]);
-            } else if !vz_under_art && np_under_art {
-                let art_rows = Layout::vertical([
-                    Constraint::Percentage(75),
-                    Constraint::Percentage(25),
-                ])
-                .split(art_col);
-                let queue_rows = Layout::vertical([
-                    Constraint::Percentage(75),
-                    Constraint::Percentage(25),
-                ])
-                .split(queue_col);
-                render_art_placeholder(app, frame, art_rows[0]);
-                now_playing::render_boxed_pane(app, frame, art_rows[1]);
-                queue::render(app, frame, queue_rows[0], true);
-                render_visualizer_pane(app, frame, queue_rows[1]);
-            } else {
-                let rows = Layout::vertical([
-                    Constraint::Percentage(50),
-                    Constraint::Percentage(25),
-                    Constraint::Percentage(25),
-                ])
-                .split(queue_col);
-                if show_art {
-                    render_art_placeholder(app, frame, art_col);
-                }
-                queue::render(app, frame, rows[0], true);
-                render_visualizer_pane(app, frame, rows[1]);
-                now_playing::render_boxed_pane(app, frame, rows[2]);
-            }
-        } else if vz_under_art && show_art {
-            let rows = Layout::vertical([
-                Constraint::Percentage(75),
-                Constraint::Percentage(25),
-            ])
-            .split(art_col);
-            render_art_placeholder(app, frame, rows[0]);
-            queue::render(app, frame, queue_col, true);
-            render_visualizer_pane(app, frame, rows[1]);
-        } else {
-            if show_art {
-                render_art_placeholder(app, frame, art_col);
-            }
-            let rows = Layout::vertical([
-                Constraint::Percentage(75),
-                Constraint::Percentage(25),
-            ])
-            .split(queue_col);
-            queue::render(app, frame, rows[0], true);
-            render_visualizer_pane(app, frame, rows[1]);
-        }
-    } else if app.lyrics_visible {
-        if show_art {
-            render_art_placeholder(app, frame, art_col);
-        }
-        let rows = Layout::vertical([
-            Constraint::Percentage(75),
-            Constraint::Percentage(25),
-        ])
-        .split(queue_col);
-        queue::render(app, frame, rows[0], true);
-        render_lyrics_pane(app, frame, rows[1]);
-    } else if boxed {
-        if np_under_art {
-            let rows = Layout::vertical([
-                Constraint::Percentage(75),
-                Constraint::Percentage(25),
-            ])
-            .split(art_col);
-            render_art_placeholder(app, frame, rows[0]);
-            now_playing::render_boxed_pane(app, frame, rows[1]);
-            queue::render(app, frame, queue_col, true);
-        } else {
-            let rows = Layout::vertical([
-                Constraint::Percentage(75),
-                Constraint::Percentage(25),
-            ])
-            .split(queue_col);
-            if show_art {
-                render_art_placeholder(app, frame, art_col);
-            }
-            queue::render(app, frame, rows[0], true);
-            now_playing::render_boxed_pane(app, frame, rows[1]);
-        }
-    } else {
-        if show_art {
-            render_art_placeholder(app, frame, art_col);
-        }
-        queue::render(app, frame, queue_col, true);
+    if let Some(r) = rects.art {
+        render_art_placeholder(app, frame, r);
+    }
+    if let Some(r) = rects.queue {
+        queue::render(app, frame, r, true);
+    }
+    if let Some(r) = rects.visualizer {
+        render_visualizer_pane(app, frame, r);
+    }
+    if let Some(r) = rects.lyrics {
+        render_lyrics_pane(app, frame, r);
+    }
+    if let Some(r) = rects.now_playing {
+        now_playing::render_boxed_pane(app, frame, r);
     }
 }
 

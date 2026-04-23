@@ -214,6 +214,19 @@ fn render_home_panel(
             app.home_recent_albums_inner = Some(albums_inner);
             f.render_widget(albums_block, area);
 
+            if !app.config.home_recent_albums_show_art {
+                render_recent_albums_list(
+                    f,
+                    albums_inner,
+                    &app.home.recent_albums,
+                    app.home.album_scroll_offset,
+                    app.home.album_selected_index,
+                    accent,
+                    is_active,
+                );
+                return;
+            }
+
             if use_strip_graphics {
                 if app.legacy_kitty_graphics_ready() || app.ratatui_uses_kitty_apc() {
                     // Kitty strip images are drawn after `terminal.draw` in main.rs.
@@ -240,6 +253,61 @@ fn render_home_panel(
             render_rediscover_block(f, area, &app.home, accent, theme);
         }
     }
+}
+
+fn render_recent_albums_list(
+    f: &mut Frame,
+    area: Rect,
+    albums: &[RecentAlbum],
+    scroll_offset: usize,
+    selected_index: usize,
+    accent: Color,
+    is_active: bool,
+) {
+    if area.height == 0 || area.width == 0 {
+        return;
+    }
+
+    if albums.is_empty() {
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "  No album history yet",
+                Style::default().fg(Color::DarkGray),
+            ))),
+            Rect { height: 1, ..area },
+        );
+        return;
+    }
+
+    // Recent-Tracks-like list, with the same scroll model as the strip (album_scroll_offset).
+    let artist_w = ((area.width as usize).saturating_sub(8) * 35 / 100).max(10);
+    let album_w = (area.width as usize)
+        .saturating_sub(8 + artist_w)
+        .max(10);
+
+    let max_items = (area.height as usize).min(albums.len().saturating_sub(scroll_offset));
+    let mut lines: Vec<Line> = Vec::new();
+    for row in 0..max_items {
+        let idx = scroll_offset + row;
+        let a = &albums[idx];
+        let text = format!(
+            " {:>2}. {:<artist_w$} {:<album_w$}",
+            idx + 1,
+            truncate(&a.artist_name, artist_w),
+            truncate(&a.album_name, album_w),
+            artist_w = artist_w,
+            album_w = album_w,
+        );
+        let selected = is_active && idx == selected_index;
+        let style = if selected {
+            Style::default().bg(accent).fg(Color::Black)
+        } else {
+            Style::default()
+        };
+        lines.push(Line::from(Span::styled(text, style)));
+    }
+
+    f.render_widget(Paragraph::new(lines), area);
 }
 
 fn render_art_strip_ratatui(

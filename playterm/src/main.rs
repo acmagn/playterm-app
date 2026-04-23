@@ -409,42 +409,38 @@ async fn run_loop(
                 {
                     let sz = terminal.size()?;
                     let show_art = app.config.nowplaying_show_art;
-                    let art_right = app
-                        .config
-                        .nowplaying_art_position
-                        .trim()
-                        .eq_ignore_ascii_case("right");
-                    let visualizer_under_art = app.visualizer_visible
-                        && app
-                            .config
-                            .visualizer_location
-                            .trim()
-                            .eq_ignore_ascii_case("art")
-                        && show_art;
-                    let boxed_np = app
+                    let terminal_rect = Rect::new(0, 0, sz.width, sz.height);
+                    let layout_opts = ui::layout::layout_options_for_app(app);
+                    let center = ui::layout::build_layout(terminal_rect, &layout_opts).center;
+
+                    let boxed = app
                         .config
                         .now_playing_layout
                         .trim()
                         .eq_ignore_ascii_case("boxed");
-                    let np_under_art = boxed_np
-                        && app
-                            .config
-                            .now_playing_box_location
-                            .trim()
-                            .eq_ignore_ascii_case("art")
-                        && show_art;
 
-                    let art_rect_opt = ui::layout::now_playing_album_art_rect(
-                        Rect::new(0, 0, sz.width, sz.height),
-                        &ui::layout::layout_options_for_app(app),
+                    let art_position = ui::layout::placement_from_str(&app.config.nowplaying_art_position)
+                        .unwrap_or(ui::layout::Placement::Left);
+                    let queue_position = ui::layout::placement_from_str(&app.config.nowplaying_queue_position)
+                        .unwrap_or(ui::layout::Placement::Right);
+                    let visualizer_position = ui::layout::placement_from_str(&app.config.visualizer_location)
+                        .unwrap_or(ui::layout::Placement::Right);
+                    let now_playing_position = ui::layout::placement_from_str(&app.config.now_playing_box_location)
+                        .unwrap_or(ui::layout::Placement::Right);
+
+                    let rects = ui::layout::now_playing_rects(
+                        center,
                         show_art,
-                        app.config.nowplaying_art_width_percent,
-                        art_right,
+                        art_position,
+                        queue_position,
+                        app.config.nowplaying_left_width_percent,
                         app.visualizer_visible,
-                        visualizer_under_art,
-                        boxed_np,
-                        np_under_art,
+                        visualizer_position,
+                        app.lyrics_visible,
+                        boxed,
+                        now_playing_position,
                     );
+                    let art_rect_opt = rects.art;
 
                     if kitty_cover_unrenderable.as_deref() == Some(cover_id.as_str()) {
                         if art_displayed {
@@ -1002,6 +998,17 @@ fn map_key(
         if kb.home_section_next.matches(code, modifiers) {
             return Action::HomeSectionNext;
         }
+        // Extra Home-section aliases: Shift+h / Shift+l (sent as H/L or h/l+SHIFT).
+        if (code == KeyCode::Char('H') && modifiers.is_empty())
+            || (code == KeyCode::Char('h') && modifiers.intersects(KeyModifiers::SHIFT))
+        {
+            return Action::HomeSectionPrev;
+        }
+        if (code == KeyCode::Char('L') && modifiers.is_empty())
+            || (code == KeyCode::Char('l') && modifiers.intersects(KeyModifiers::SHIFT))
+        {
+            return Action::HomeSectionNext;
+        }
         if kb.home_section_prev.matches(code, modifiers) {
             return Action::HomeSectionPrev;
         }
@@ -1426,41 +1433,34 @@ fn handle_mouse_click(x: u16, y: u16, app: &mut App, terminal_size: ratatui::lay
         }
         Tab::NowPlaying => {
             let show_art = app.config.nowplaying_show_art;
-            let visualizer_under_art = app.visualizer_visible
-                && app
-                    .config
-                    .visualizer_location
-                    .trim()
-                    .eq_ignore_ascii_case("art")
-                && show_art;
             let boxed_np = app
                 .config
                 .now_playing_layout
                 .trim()
                 .eq_ignore_ascii_case("boxed");
-            let np_under_art = boxed_np
-                && app
-                    .config
-                    .now_playing_box_location
-                    .trim()
-                    .eq_ignore_ascii_case("art")
-                && show_art;
 
             if boxed_np {
-                if let Some(pane) = ui::layout::now_playing_boxed_pane_rect(
+                let art_position = ui::layout::placement_from_str(&app.config.nowplaying_art_position)
+                    .unwrap_or(ui::layout::Placement::Left);
+                let queue_position = ui::layout::placement_from_str(&app.config.nowplaying_queue_position)
+                    .unwrap_or(ui::layout::Placement::Right);
+                let visualizer_position = ui::layout::placement_from_str(&app.config.visualizer_location)
+                    .unwrap_or(ui::layout::Placement::Right);
+                let now_playing_position = ui::layout::placement_from_str(&app.config.now_playing_box_location)
+                    .unwrap_or(ui::layout::Placement::Right);
+                let rects = ui::layout::now_playing_rects(
                     center,
                     show_art,
-                    app.config.nowplaying_art_width_percent,
-                    app.config
-                        .nowplaying_art_position
-                        .trim()
-                        .eq_ignore_ascii_case("right"),
-                    app.lyrics_visible,
+                    art_position,
+                    queue_position,
+                    app.config.nowplaying_left_width_percent,
                     app.visualizer_visible,
-                    visualizer_under_art,
-                    true,
-                    np_under_art,
-                ) {
+                    visualizer_position,
+                    app.lyrics_visible,
+                    boxed_np,
+                    now_playing_position,
+                );
+                if let Some(pane) = rects.now_playing {
                     let chrome = ui::now_playing::interaction_rects_pane(app, pane);
                     if let Some(controls_area) = chrome.controls {
                         if y >= controls_area.y
@@ -1509,17 +1509,29 @@ fn handle_mouse_click(x: u16, y: u16, app: &mut App, terminal_size: ratatui::lay
                 }
             }
 
-            let queue_area = ui::layout::now_playing_queue_widget_rect(
+            let art_position = ui::layout::placement_from_str(&app.config.nowplaying_art_position)
+                .unwrap_or(ui::layout::Placement::Left);
+            let queue_position = ui::layout::placement_from_str(&app.config.nowplaying_queue_position)
+                .unwrap_or(ui::layout::Placement::Right);
+            let visualizer_position = ui::layout::placement_from_str(&app.config.visualizer_location)
+                .unwrap_or(ui::layout::Placement::Right);
+            let now_playing_position = ui::layout::placement_from_str(&app.config.now_playing_box_location)
+                .unwrap_or(ui::layout::Placement::Right);
+            let rects = ui::layout::now_playing_rects(
                 center,
                 show_art,
-                app.config.nowplaying_art_width_percent,
-                app.config.nowplaying_art_position.trim().eq_ignore_ascii_case("right"),
-                app.lyrics_visible,
+                art_position,
+                queue_position,
+                app.config.nowplaying_left_width_percent,
                 app.visualizer_visible,
-                visualizer_under_art,
+                visualizer_position,
+                app.lyrics_visible,
                 boxed_np,
-                np_under_art,
+                now_playing_position,
             );
+            let Some(queue_area) = rects.queue else {
+                return;
+            };
             if x < queue_area.x || x >= queue_area.x + queue_area.width {
                 return;
             }
